@@ -22,6 +22,7 @@ packages:
   - jq
   - htop
   - tree
+  - mosh
 
 users:
   - name: {{ username }}

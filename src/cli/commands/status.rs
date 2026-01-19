@@ -15,6 +15,24 @@ struct BootstrapStatus {
     bootstrap_ready: bool,
 }
 
+/// Bootstrap steps in order of execution
+const BOOTSTRAP_STEPS: &[(&str, &str)] = &[
+    ("starting", "Starting bootstrap"),
+    ("installing:parallel", "Installing tools (Docker, fzf, bat, eza...)"),
+    ("installing:devenv", "Installing dev environment (Node.js, Claude Code)"),
+    ("installing:agent", "Installing spuff-agent"),
+    ("installing:dotfiles", "Configuring dotfiles"),
+    ("installing:tailscale", "Setting up Tailscale"),
+    ("ready", "Bootstrap complete"),
+];
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum StepState {
+    Pending,
+    InProgress,
+    Completed,
+}
+
 pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
     let db = StateDb::open()?;
 
@@ -62,6 +80,12 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
                         style("Bootstrap").dim(),
                         format_bootstrap_status(&bootstrap.bootstrap_status)
                     );
+
+                    // Show bootstrap checklist if not ready
+                    if bootstrap.bootstrap_status != "ready" {
+                        println!();
+                        print_bootstrap_checklist(&bootstrap.bootstrap_status);
+                    }
                 }
             }
 
@@ -106,6 +130,67 @@ fn format_bootstrap_status(status: &str) -> console::StyledObject<String> {
         "failed" => style(display).red(),
         "" | "unknown" => style(display).dim(),
         _ => style(display).yellow(),
+    }
+}
+
+/// Get the state of a step based on current status
+fn get_step_state(step_key: &str, current_status: &str) -> StepState {
+    // Find the index of the current status in the steps
+    let current_idx = BOOTSTRAP_STEPS
+        .iter()
+        .position(|(key, _)| *key == current_status || current_status.starts_with(key));
+
+    let step_idx = BOOTSTRAP_STEPS
+        .iter()
+        .position(|(key, _)| *key == step_key);
+
+    match (current_idx, step_idx) {
+        (Some(curr), Some(step)) => {
+            if step < curr {
+                StepState::Completed
+            } else if step == curr {
+                StepState::InProgress
+            } else {
+                StepState::Pending
+            }
+        }
+        _ => StepState::Pending,
+    }
+}
+
+/// Print a visual checklist of bootstrap progress
+fn print_bootstrap_checklist(current_status: &str) {
+    println!("  {}", style("Bootstrap Progress").dim().bold());
+    println!();
+
+    for (step_key, step_label) in BOOTSTRAP_STEPS {
+        // Skip optional steps that might not apply
+        if *step_key == "installing:dotfiles" || *step_key == "installing:tailscale" {
+            // Only show if we're at or past this step
+            let state = get_step_state(step_key, current_status);
+            if state == StepState::Pending && current_status != *step_key {
+                continue;
+            }
+        }
+
+        let state = get_step_state(step_key, current_status);
+
+        let (icon, styled_label) = match state {
+            StepState::Completed => (
+                style("[x]").green(),
+                style(*step_label).green(),
+            ),
+            StepState::InProgress => (
+                style("[>]").yellow().bold(),
+                style(*step_label).yellow().bold(),
+            ),
+            StepState::Pending => (
+                style("[ ]").dim(),
+                style(*step_label).dim(),
+            ),
+        };
+
+        println!("    {} {}", icon, styled_label);
     }
 }
 

@@ -7,6 +7,46 @@ use tokio::process::Command;
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
 
+/// Check if mosh is available locally
+pub fn is_mosh_available() -> bool {
+    std::process::Command::new("which")
+        .arg("mosh")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Connect to remote host via mosh (requires mosh installed locally and on server)
+pub async fn connect_mosh(host: &str, config: &AppConfig) -> Result<()> {
+    let mut cmd = Command::new("mosh");
+
+    // mosh uses --ssh to pass SSH options
+    let ssh_options = format!(
+        "ssh -A -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i {}",
+        &config.ssh_key_path
+    );
+
+    cmd.arg("--ssh")
+        .arg(&ssh_options)
+        .arg(format!("{}@{}", config.ssh_user, host));
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await?;
+
+    if !status.success() {
+        return Err(SpuffError::Ssh(format!(
+            "Mosh connection failed with code: {:?}",
+            status.code()
+        )));
+    }
+
+    Ok(())
+}
+
 pub async fn wait_for_ssh(host: &str, port: u16, timeout: Duration) -> Result<()> {
     let start = std::time::Instant::now();
     let addr = format!("{}:{}", host, port);
@@ -111,7 +151,25 @@ pub async fn wait_for_ssh_login(host: &str, config: &AppConfig, timeout: Duratio
     )))
 }
 
+/// Connect to remote host, preferring mosh if available locally (falls back to SSH)
 pub async fn connect(host: &str, config: &AppConfig) -> Result<()> {
+    // Try mosh first if available locally
+    if is_mosh_available() {
+        eprintln!("  Using mosh for better latency...");
+        match connect_mosh(host, config).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("  Mosh failed ({}), falling back to SSH...", e);
+            }
+        }
+    }
+
+    // Fallback to SSH
+    connect_ssh(host, config).await
+}
+
+/// Connect to remote host via SSH only
+pub async fn connect_ssh(host: &str, config: &AppConfig) -> Result<()> {
     let mut cmd = Command::new("ssh");
 
     cmd.arg("-A") // Enable SSH agent forwarding for git operations

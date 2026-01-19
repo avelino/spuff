@@ -376,22 +376,59 @@ fn format_percent_colored(percent: f32) -> console::StyledObject<String> {
     }
 }
 
+/// Find the start of a JSON array, skipping ANSI escape sequences.
+fn find_json_array_start(output: &str) -> Option<usize> {
+    let bytes = output.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'[' {
+            // Skip if this is an ANSI escape sequence (preceded by ESC 0x1b)
+            if i > 0 && bytes[i - 1] == 0x1b {
+                continue;
+            }
+            // Check if it looks like a JSON array: '[{', '["', '[n' (number), or '[]'
+            if i + 1 < bytes.len() {
+                let next = bytes[i + 1];
+                if next == b'{' || next == b'"' || next == b']' || next.is_ascii_digit() {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract JSON from output that may contain banner text before/after.
 ///
-/// Priority: JSON objects first (more common API responses), then arrays.
+/// Priority: whichever appears first in the output (array or object).
 fn extract_json(output: &str) -> &str {
-    // First, look for '{' - JSON object (most API responses are objects)
-    if let Some(brace_pos) = output.find('{') {
-        // Find the matching '}' by counting braces
+    let brace_pos = output.find('{');
+    let bracket_pos = find_json_array_start(output);
+
+    // Determine which comes first: array or object
+    let (start_pos, is_array) = match (bracket_pos, brace_pos) {
+        (Some(b), Some(o)) => {
+            if b < o {
+                (b, true)
+            } else {
+                (o, false)
+            }
+        }
+        (Some(b), None) => (b, true),
+        (None, Some(o)) => (o, false),
+        (None, None) => return output.trim(),
+    };
+
+    if is_array {
+        // Extract JSON array
         let mut depth = 0;
         let mut end_pos = None;
-        for (i, c) in output[brace_pos..].char_indices() {
+        for (i, c) in output[start_pos..].char_indices() {
             match c {
-                '{' => depth += 1,
-                '}' => {
+                '[' => depth += 1,
+                ']' => {
                     depth -= 1;
                     if depth == 0 {
-                        end_pos = Some(brace_pos + i);
+                        end_pos = Some(start_pos + i);
                         break;
                     }
                 }
@@ -399,42 +436,27 @@ fn extract_json(output: &str) -> &str {
             }
         }
         if let Some(end) = end_pos {
-            return &output[brace_pos..=end];
+            return &output[start_pos..=end];
         }
-    }
-
-    // Then look for array patterns '[{' or '["' (for endpoints returning arrays)
-    let bytes = output.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'[' && i + 1 < bytes.len() {
-            // Skip if this is an ANSI escape sequence (preceded by ESC 0x1b)
-            if i > 0 && bytes[i - 1] == 0x1b {
-                continue;
-            }
-
-            let next = bytes[i + 1];
-            // Check if it looks like JSON array: '[{' or '["'
-            if next == b'{' || next == b'"' {
-                // Find matching ']' by counting brackets
-                let mut depth = 0;
-                let mut end_pos = None;
-                for (j, c) in output[i..].char_indices() {
-                    match c {
-                        '[' => depth += 1,
-                        ']' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end_pos = Some(i + j);
-                                break;
-                            }
-                        }
-                        _ => {}
+    } else {
+        // Extract JSON object
+        let mut depth = 0;
+        let mut end_pos = None;
+        for (i, c) in output[start_pos..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = Some(start_pos + i);
+                        break;
                     }
                 }
-                if let Some(end) = end_pos {
-                    return &output[i..=end];
-                }
+                _ => {}
             }
+        }
+        if let Some(end) = end_pos {
+            return &output[start_pos..=end];
         }
     }
 

@@ -9,7 +9,7 @@ This document provides a deep dive into spuff's architecture, protocols, data fl
 - [Protocol Stack](#protocol-stack)
 - [Data Flow](#data-flow)
 - [Cloud Provider Integration](#cloud-provider-integration)
-- [SSH/SCP Communication](#sshscp-communication)
+- [SSH/Mosh/SCP Communication](#sshmoshscp-communication)
 - [Agent HTTP API](#agent-http-api)
 - [Cloud-Init Provisioning](#cloud-init-provisioning)
 - [State Management](#state-management)
@@ -131,6 +131,7 @@ Spuff uses three distinct communication protocols:
 |----------|----------|------|------------|
 | HTTPS | Cloud Provider API | 443 | TLS 1.2+ |
 | SSH | Remote shell & SCP | 22 | SSH protocol |
+| Mosh | Interactive shell (preferred) | UDP 60000-61000 | AES-128 |
 | HTTP | Agent API | 7575 | None (localhost) |
 
 ### Protocol Flow Diagram
@@ -179,7 +180,9 @@ Spuff uses three distinct communication protocols:
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ 7. SSH interactive session: ssh -A dev@<ip>                                 │
+│ 7. Interactive session: mosh (preferred) or ssh -A dev@<ip>                 │
+│    - Uses mosh if installed locally (better latency, roaming support)       │
+│    - Falls back to SSH if mosh not available                                │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -316,9 +319,34 @@ The CLI polls `GET /droplets/{id}` every 5 seconds until:
 
 ---
 
-## SSH/SCP Communication
+## SSH/Mosh/SCP Communication
 
 Located in `src/connector/ssh.rs`.
+
+### Mosh Support
+
+Spuff automatically uses **mosh** (Mobile Shell) for interactive connections when available locally. Mosh provides:
+
+- Better responsiveness over high-latency connections
+- Seamless roaming between networks
+- Connection resilience (survives sleep/wake, network changes)
+
+**How it works:**
+
+1. CLI checks if `mosh` is installed locally (`which mosh`)
+2. If available, uses mosh for interactive sessions
+3. Falls back to SSH if mosh is not installed locally
+
+The remote server always has mosh-server installed via cloud-init.
+
+```bash
+# Mosh connection (automatic when mosh is available)
+mosh --ssh="ssh -A -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i ~/.ssh/id_ed25519" dev@<ip>
+```
+
+**Note:** Non-interactive operations (SCP, remote commands) always use SSH regardless of mosh availability.
+
+### SSH Operations
 
 All SSH operations use the system's `ssh` and `scp` binaries with consistent options:
 
@@ -389,15 +417,25 @@ Command::new("scp")
 **connect(host, config)**
 
 ```rust
-// Interactive SSH session with agent forwarding
-Command::new("ssh")
-    .arg("-A")  // Forward SSH agent for git
-    .args([...common_options...])
-    .arg(format!("{}@{}", config.ssh_user, host))
-    .stdin(Stdio::inherit())
-    .stdout(Stdio::inherit())
-    .stderr(Stdio::inherit())
-    .status().await
+// Prefers mosh if available locally, falls back to SSH
+if is_mosh_available() {
+    // Mosh connection with SSH options
+    Command::new("mosh")
+        .arg("--ssh")
+        .arg("ssh -A -o StrictHostKeyChecking=accept-new ...")
+        .arg(format!("{}@{}", config.ssh_user, host))
+        .status().await
+} else {
+    // Fallback: Interactive SSH session with agent forwarding
+    Command::new("ssh")
+        .arg("-A")  // Forward SSH agent for git
+        .args([...common_options...])
+        .arg(format!("{}@{}", config.ssh_user, host))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status().await
+}
 ```
 
 ### SSH Agent Forwarding
@@ -753,6 +791,9 @@ Internet                    VM
    │                        │
    │    ┌───────────────────┤
    │    │ Port 22 (SSH)     │  ← Only authenticated access
+   │    └───────────────────┤
+   │    ┌───────────────────┤
+   │    │ UDP 60000-61000   │  ← Mosh (authenticated via SSH handshake)
    │    └───────────────────┤
    │    ┌───────────────────┤
    │    │ Port 7575 (Agent) │  ← localhost only, not exposed
