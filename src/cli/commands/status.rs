@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::config::AppConfig;
 use crate::error::Result;
+use crate::project_config::{ProjectConfig, ProjectSetupState, SetupStatus};
 use crate::provider::create_provider;
 use crate::state::StateDb;
 use crate::utils::format_elapsed;
@@ -118,7 +119,25 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
                             println!();
                             print_devtools_status(&devtools);
                         }
+
+                        // Show project setup status if project.json exists
+                        if let Ok(project_status) = get_project_status(&instance.ip, config).await {
+                            println!();
+                            print_project_setup_status(&project_status);
+                        }
                     }
+                }
+            }
+
+            // Check for local spuff.yaml
+            if let Ok(Some(_pc)) = ProjectConfig::load_from_cwd() {
+                if !detailed {
+                    println!();
+                    println!(
+                        "  {} {} spuff status --detailed",
+                        style("Project config found (spuff.yaml).").dim(),
+                        style("Run").dim()
+                    );
                 }
             }
 
@@ -311,5 +330,176 @@ fn print_devtools_status(devtools: &DevToolsState) {
         };
 
         println!("    {} {}{}{}", icon, name_style, version_str, error_str);
+    }
+}
+
+async fn get_project_status(ip: &str, config: &AppConfig) -> Result<ProjectSetupState> {
+    let output = crate::connector::ssh::run_command(
+        ip,
+        config,
+        "curl -s http://127.0.0.1:7575/project/status 2>/dev/null || echo '{}'",
+    )
+    .await?;
+
+    serde_json::from_str(&output).map_err(|e| {
+        crate::error::SpuffError::Provider(format!("Failed to parse project status: {}", e))
+    })
+}
+
+fn print_project_setup_status(status: &ProjectSetupState) {
+    // Check if project setup was started
+    if !status.started {
+        return;
+    }
+
+    println!(
+        "  {} {}",
+        style("╭").dim(),
+        style("─".repeat(56)).dim()
+    );
+    println!(
+        "  {}  {}",
+        style("│").dim(),
+        style("Project Setup (spuff.yaml)").cyan().bold()
+    );
+    println!(
+        "  {} {}",
+        style("├").dim(),
+        style("─".repeat(56)).dim()
+    );
+
+    // Bundles
+    if !status.bundles.is_empty() {
+        println!(
+            "  {}  {}",
+            style("│").dim(),
+            style("Bundles").dim().bold()
+        );
+        for bundle in &status.bundles {
+            let (icon, name_style) = format_setup_status(&bundle.status, &bundle.name);
+            let version_str = bundle.version.as_ref()
+                .map(|v| format!(" ({})", style(v).dim()))
+                .unwrap_or_default();
+            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, version_str);
+        }
+    }
+
+    // Packages
+    let packages = &status.packages;
+    if !packages.installed.is_empty() || !packages.failed.is_empty() || packages.status != SetupStatus::Pending {
+        println!(
+            "  {}  {}",
+            style("│").dim(),
+            style("Packages").dim().bold()
+        );
+        let installed_count = packages.installed.len();
+        let failed_count = packages.failed.len();
+        let (icon, status_text) = match &packages.status {
+            SetupStatus::Done => (
+                style("[✓]").green(),
+                style(format!("{} installed", installed_count)).green()
+            ),
+            SetupStatus::InProgress => (
+                style("[>]").yellow().bold(),
+                style(format!("{} installed, installing...", installed_count)).yellow()
+            ),
+            SetupStatus::Pending => (
+                style("[ ]").dim(),
+                style("pending".to_string()).dim()
+            ),
+            SetupStatus::Failed(_) => (
+                style("[!]").red(),
+                style(format!("{} failed", failed_count)).red()
+            ),
+            SetupStatus::Skipped => (
+                style("[-]").dim(),
+                style("skipped".to_string()).dim()
+            ),
+        };
+        println!("  {}    {} {}", style("│").dim(), icon, status_text);
+    }
+
+    // Services
+    let services = &status.services;
+    if !services.containers.is_empty() {
+        println!(
+            "  {}  {}",
+            style("│").dim(),
+            style("Services (docker-compose)").dim().bold()
+        );
+        for container in &services.containers {
+            let is_running = container.status == "running";
+            let (icon, name_style) = if is_running {
+                (style("[✓]").green(), style(&container.name).green())
+            } else {
+                (style("[ ]").dim(), style(&container.name).dim())
+            };
+            let port_str = container.port
+                .map(|p| format!(" ({})", style(p).dim()))
+                .unwrap_or_default();
+            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, port_str);
+        }
+    }
+
+    // Repositories
+    if !status.repositories.is_empty() {
+        println!(
+            "  {}  {}",
+            style("│").dim(),
+            style("Repositories").dim().bold()
+        );
+        for repo in &status.repositories {
+            // Use URL as display name, extract repo name from it
+            let display_name = repo.url
+                .rsplit('/')
+                .next()
+                .unwrap_or(&repo.url)
+                .strip_suffix(".git")
+                .unwrap_or(&repo.url);
+            let (icon, name_style) = format_setup_status(&repo.status, display_name);
+            let path_str = format!(" → {}", style(&repo.path).dim());
+            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, path_str);
+        }
+    }
+
+    // Setup Scripts
+    if !status.scripts.is_empty() {
+        println!(
+            "  {}  {}",
+            style("│").dim(),
+            style("Setup Scripts").dim().bold()
+        );
+        for (i, script) in status.scripts.iter().enumerate() {
+            let (icon, _) = format_setup_status(&script.status, &script.command);
+            let cmd_display = if script.command.len() > 45 {
+                format!("{}...", &script.command[..42])
+            } else {
+                script.command.clone()
+            };
+            let cmd_style = match &script.status {
+                SetupStatus::Done => style(cmd_display).green(),
+                SetupStatus::InProgress => style(cmd_display).yellow().bold(),
+                SetupStatus::Pending => style(cmd_display).dim(),
+                SetupStatus::Failed(_) => style(cmd_display).red(),
+                SetupStatus::Skipped => style(cmd_display).dim(),
+            };
+            println!("  {}    {} #{} {}", style("│").dim(), icon, i + 1, cmd_style);
+        }
+    }
+
+    println!(
+        "  {} {}",
+        style("╰").dim(),
+        style("─".repeat(56)).dim()
+    );
+}
+
+fn format_setup_status<'a>(status: &SetupStatus, name: &'a str) -> (console::StyledObject<&'static str>, console::StyledObject<&'a str>) {
+    match status {
+        SetupStatus::Done => (style("[✓]").green(), style(name).green()),
+        SetupStatus::InProgress => (style("[>]").yellow().bold(), style(name).yellow().bold()),
+        SetupStatus::Pending => (style("[ ]").dim(), style(name).dim()),
+        SetupStatus::Failed(_) => (style("[!]").red(), style(name).red()),
+        SetupStatus::Skipped => (style("[-]").dim(), style(name).dim()),
     }
 }

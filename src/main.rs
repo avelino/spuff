@@ -1,8 +1,10 @@
+mod bundles;
 mod cli;
 mod config;
 mod connector;
 mod environment;
 mod error;
+mod project_config;
 mod provider;
 mod state;
 mod tui;

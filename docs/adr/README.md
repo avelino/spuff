@@ -20,6 +20,7 @@ An ADR is a document that captures an important architectural decision made alon
 | [0003](0003-sqlite-local-state.md) | SQLite for local state management | Accepted | 2025-01 |
 | [0004](0004-ssh-agent-forwarding.md) | SSH agent forwarding for git access | Accepted | 2025-01 |
 | [0005](0005-provider-trait-abstraction.md) | Provider trait for cloud abstraction | Accepted | 2025-01 |
+| [0006](0006-project-config-spec.md) | Project configuration (spuff.yaml) | Accepted | 2025-01 |
 
 ## Status Values
 

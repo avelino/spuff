@@ -71,6 +71,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Base64 for cloud-init
 base64 = "0.22"
 
+# Lightweight regex for env var resolution
+regex-lite = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"

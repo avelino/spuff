@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 use crate::connector::ssh::{wait_for_ssh, wait_for_ssh_login};
 use crate::environment::cloud_init::generate_cloud_init;
 use crate::error::{Result, SpuffError};
+use crate::project_config::ProjectConfig;
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
@@ -47,6 +48,19 @@ pub async fn execute(
         );
         return Ok(());
     }
+
+    // Load project config from spuff.yaml (if exists)
+    let project_config = ProjectConfig::load_from_cwd()
+        .ok()
+        .flatten();
+
+    // Apply project config overrides (CLI args take precedence)
+    let effective_size = size.or_else(|| {
+        project_config.as_ref().and_then(|p| p.resources.size.clone())
+    });
+    let effective_region = region.or_else(|| {
+        project_config.as_ref().and_then(|p| p.resources.region.clone())
+    });
 
     // Pre-flight check: verify SSH key is usable
     verify_ssh_key_accessible(config).await?;
@@ -94,11 +108,17 @@ pub async fn execute(
         steps.push("Uploading local agent".to_string());
     }
 
+    // Print project config summary if found
+    if let Some(ref pc) = project_config {
+        print_project_summary(pc);
+    }
+
     // Clone config values for the async task
     let config_clone = config.clone();
-    let region_clone = region.clone();
-    let size_clone = size.clone();
+    let region_clone = effective_region.clone();
+    let size_clone = effective_size.clone();
     let snapshot_clone = snapshot.clone();
+    let project_config_clone = project_config.clone();
 
     // Spawn the provisioning task
     let provision_task = tokio::spawn(async move {
@@ -107,6 +127,7 @@ pub async fn execute(
             size_clone,
             snapshot_clone,
             region_clone,
+            project_config_clone,
             dev,
             tx,
         )
@@ -288,11 +309,97 @@ async fn build_linux_agent() -> Result<String> {
     Ok(agent_path)
 }
 
+/// Print project configuration summary
+fn print_project_summary(project_config: &ProjectConfig) {
+    println!();
+    println!(
+        "  {}",
+        style("╭──────────────────────────────────────────────────────────╮").dim()
+    );
+    println!(
+        "  {}  {:<56} {}",
+        style("│").dim(),
+        style("Project Setup (spuff.yaml)").cyan().bold(),
+        style("│").dim()
+    );
+
+    if !project_config.bundles.is_empty() {
+        let bundles_str = project_config.bundles.join(", ");
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Bundles: {}", bundles_str),
+            style("│").dim()
+        );
+    }
+
+    if !project_config.packages.is_empty() {
+        let count = project_config.packages.len();
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Packages: {} to install", count),
+            style("│").dim()
+        );
+    }
+
+    if project_config.services.enabled {
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Services: {}", project_config.services.compose_file),
+            style("│").dim()
+        );
+    }
+
+    if !project_config.repositories.is_empty() {
+        let count = project_config.repositories.len();
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Repositories: {} to clone", count),
+            style("│").dim()
+        );
+    }
+
+    if !project_config.ports.is_empty() {
+        let ports_str = project_config
+            .ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Ports: {} (tunnel via spuff ssh)", ports_str),
+            style("│").dim()
+        );
+    }
+
+    if !project_config.setup.is_empty() {
+        let count = project_config.setup.len();
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Setup scripts: {} commands", count),
+            style("│").dim()
+        );
+    }
+
+    println!(
+        "  {}",
+        style("╰──────────────────────────────────────────────────────────╯").dim()
+    );
+    println!();
+}
+
 async fn provision_instance(
     config: &AppConfig,
     size: Option<String>,
     snapshot: Option<String>,
     region: Option<String>,
+    project_config: Option<ProjectConfig>,
     dev: bool,
     tx: mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
@@ -307,7 +414,7 @@ async fn provision_instance(
         .await
         .ok();
 
-    let user_data = generate_cloud_init(config)?;
+    let user_data = generate_cloud_init(config, project_config.as_ref())?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();

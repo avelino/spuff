@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::devtools::DevToolsConfig;
 use crate::metrics::get_top_processes;
+use crate::project_setup::ProjectSetupManager;
 use crate::AppState;
 
 /// Directory where log files can be read from.
@@ -45,6 +46,10 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         // Devtools management
         .route("/devtools", get(devtools_status))
         .route("/devtools/install", post(devtools_install))
+        // Project setup (from spuff.yaml)
+        .route("/project/config", get(project_config))
+        .route("/project/status", get(project_status))
+        .route("/project/setup", post(project_setup))
 }
 
 /// Custom extractor that validates authentication before allowing access to state.
@@ -577,6 +582,64 @@ async fn devtools_install(
             Ok(Json(serde_json::json!({
                 "status": "started",
                 "message": "Devtools installation started. Poll GET /devtools for status."
+            })))
+        }
+        Err(e) => {
+            Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new(e)),
+            ))
+        }
+    }
+}
+
+/// GET /project/config - Get project configuration (requires authentication)
+///
+/// Returns the project configuration loaded from /opt/spuff/project.json
+async fn project_config(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+
+    match ProjectSetupManager::load_config() {
+        Some(config) => Json(serde_json::json!({
+            "found": true,
+            "config": config
+        })),
+        None => Json(serde_json::json!({
+            "found": false,
+            "message": "No project config found at /opt/spuff/project.json"
+        }))
+    }
+}
+
+/// GET /project/status - Get project setup status (requires authentication)
+///
+/// Returns the current status of project setup including bundles, packages, repos, etc.
+async fn project_status(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+    let project_state = state.project_setup.get_state().await;
+    Json(project_state)
+}
+
+/// POST /project/setup - Start project setup (requires authentication)
+///
+/// Starts async project setup from /opt/spuff/project.json.
+/// Returns immediately; poll GET /project/status for progress.
+async fn project_setup(
+    AuthenticatedState(state): AuthenticatedState,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    // Log the setup request
+    state.log_activity(
+        "project_setup",
+        Some("Starting project setup from spuff.yaml".to_string())
+    ).await;
+
+    match state.project_setup.start_setup().await {
+        Ok(()) => {
+            Ok(Json(serde_json::json!({
+                "status": "started",
+                "message": "Project setup started. Poll GET /project/status for progress."
             })))
         }
         Err(e) => {

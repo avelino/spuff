@@ -25,6 +25,7 @@
 
 mod devtools;
 mod metrics;
+mod project_setup;
 mod routes;
 
 use std::collections::VecDeque;
@@ -38,6 +39,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::devtools::DevToolsManager;
 use crate::metrics::SystemMetrics;
+use crate::project_setup::ProjectSetupManager;
 
 /// Maximum number of activity log entries to keep in memory
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
@@ -77,6 +79,8 @@ pub struct AppState {
     pub activity_log: RwLock<VecDeque<ActivityLogEntry>>,
     /// Devtools installation manager
     pub devtools: DevToolsManager,
+    /// Project setup manager (from spuff.yaml)
+    pub project_setup: ProjectSetupManager,
 }
 
 impl AppState {
@@ -88,7 +92,8 @@ impl AppState {
             metrics: RwLock::new(SystemMetrics::collect()),
             auth_token,
             activity_log: RwLock::new(VecDeque::with_capacity(MAX_ACTIVITY_LOG_ENTRIES)),
-            devtools: DevToolsManager::new(username),
+            devtools: DevToolsManager::new(username.clone()),
+            project_setup: ProjectSetupManager::new(username),
         }
     }
 
