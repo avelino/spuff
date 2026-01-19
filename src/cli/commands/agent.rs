@@ -15,6 +15,7 @@ struct AgentStatus {
     #[serde(default)]
     bootstrap_status: String,
     #[serde(default)]
+    #[allow(dead_code)]
     bootstrap_ready: bool,
     agent_version: String,
 }
@@ -59,6 +60,20 @@ struct ActivityLogEntry {
 #[derive(Debug, Deserialize)]
 struct ActivityLogResponse {
     entries: Vec<ActivityLogEntry>,
+    #[allow(dead_code)]
+    count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecLogEntry {
+    timestamp: String,
+    event: String,
+    details: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecLogResponse {
+    entries: Vec<ExecLogEntry>,
     #[allow(dead_code)]
     count: usize,
 }
@@ -307,6 +322,63 @@ pub async fn activity(config: &AppConfig, limit: usize, follow: bool) -> Result<
                 print_activity_entry(entry);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Show persistent exec log (all commands executed via agent, survives restarts)
+pub async fn exec_log(config: &AppConfig, lines: usize) -> Result<()> {
+    let db = StateDb::open()?;
+    let instance = db
+        .get_active_instance()?
+        .ok_or(SpuffError::NoActiveInstance)?;
+
+    let response: ExecLogResponse = agent_request(
+        &instance.ip,
+        config,
+        &format!("/exec-log?lines={}", lines)
+    ).await?;
+
+    if response.entries.is_empty() {
+        println!("{}", style("No exec commands logged yet").dim());
+    } else {
+        println!("{}", style("Exec Log (persistent)").bold().cyan());
+        println!(
+            "  {:<20} {:<15} {}",
+            style("TIMESTAMP").dim(),
+            style("EVENT").dim(),
+            style("DETAILS").dim()
+        );
+        println!("  {}", "-".repeat(70));
+
+        for entry in &response.entries {
+            let time = if entry.timestamp.len() >= 19 {
+                &entry.timestamp[..19]
+            } else {
+                &entry.timestamp
+            };
+
+            let event_style = match entry.event.as_str() {
+                "exec" => style(&entry.event).cyan(),
+                "exec_failed" | "exec_timeout" => style(&entry.event).red(),
+                _ => style(&entry.event).white(),
+            };
+
+            println!(
+                "  {:<20} {:<15} {}",
+                style(time).dim(),
+                event_style,
+                style(&entry.details).white()
+            );
+        }
+
+        println!();
+        println!(
+            "  {} Total entries: {}",
+            style("→").dim(),
+            style(response.count).cyan()
+        );
     }
 
     Ok(())

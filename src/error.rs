@@ -21,9 +21,6 @@ pub enum SpuffError {
     #[error("No active instance found")]
     NoActiveInstance,
 
-    #[error("Instance not ready: {0}")]
-    InstanceNotReady(String),
-
     #[error("Cloud-init failed: {0}")]
     CloudInit(String),
 

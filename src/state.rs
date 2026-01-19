@@ -43,6 +43,7 @@ pub struct LocalInstance {
 
 /// Legacy type alias for backward compatibility.
 #[deprecated(since = "0.2.0", note = "Use LocalInstance instead")]
+#[allow(dead_code)]
 pub type Instance = LocalInstance;
 
 impl LocalInstance {
@@ -66,6 +67,7 @@ impl LocalInstance {
     }
 
     /// Create a new LocalInstance with the current timestamp.
+    #[allow(dead_code)]
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,

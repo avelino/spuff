@@ -161,6 +161,13 @@ pub enum AgentCommands {
         #[arg(short, long)]
         follow: bool,
     },
+
+    /// View persistent exec log (survives agent restarts)
+    ExecLog {
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+    },
 }
 
 impl Cli {
@@ -215,6 +222,9 @@ impl Cli {
                     }
                     AgentCommands::Activity { limit, follow } => {
                         commands::agent::activity(&config, limit, follow).await
+                    }
+                    AgentCommands::ExecLog { lines } => {
+                        commands::agent::exec_log(&config, lines).await
                     }
                 }
             }

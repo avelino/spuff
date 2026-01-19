@@ -1,140 +1,177 @@
 # Provider System
 
-Spuff uses a provider abstraction layer that allows it to work with multiple cloud providers. This document explains how the provider system works.
+Spuff uses a provider abstraction layer that enables support for multiple cloud providers. This document explains how the system works.
 
 ## Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         spuff CLI                            │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │                    Provider Trait                       │  │
-│  │                                                         │  │
-│  │  create_instance()  destroy_instance()  list_instances()│  │
-│  │  get_instance()     wait_ready()        create_snapshot()│ │
-│  │  list_snapshots()   delete_snapshot()                   │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                              │                                │
-│         ┌────────────────────┼────────────────────┐          │
-│         │                    │                    │          │
-│         ▼                    ▼                    ▼          │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐    │
-│  │DigitalOcean │     │   Hetzner   │     │     AWS     │    │
-│  │  Provider   │     │  Provider   │     │  Provider   │    │
-│  └─────────────┘     └─────────────┘     └─────────────┘    │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                            spuff CLI                                  │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │                    Provider Registry                             │ │
+│  │                                                                  │ │
+│  │   ProviderFactory ──► create() ──► Box<dyn Provider>            │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+│                               │                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │                     Provider Trait                               │ │
+│  │                                                                  │ │
+│  │  create_instance()   destroy_instance()   list_instances()      │ │
+│  │  get_instance()      wait_ready()         create_snapshot()     │ │
+│  │  list_snapshots()    delete_snapshot()    get_ssh_keys()        │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+│                               │                                       │
+│         ┌─────────────────────┼─────────────────────┐                │
+│         │                     │                     │                │
+│         ▼                     ▼                     ▼                │
+│  ┌─────────────┐       ┌─────────────┐       ┌─────────────┐        │
+│  │DigitalOcean │       │   Hetzner   │       │     AWS     │        │
+│  │  Provider   │       │  Provider   │       │  Provider   │        │
+│  │   + Factory │       │  + Factory  │       │  + Factory  │        │
+│  └─────────────┘       └─────────────┘       └─────────────┘        │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Architecture
 
-### Provider Trait
+The provider system follows the **Registry Pattern**, which enables:
 
-The `Provider` trait (`src/provider/mod.rs`) defines the interface that all cloud providers must implement:
+1. **Extensibility**: Add new providers without modifying existing code
+2. **Dynamic discovery**: List available providers at runtime
+3. **Uniform configuration**: All providers use the same creation interface
+
+### Main Components
+
+| File | Responsibility |
+|------|----------------|
+| `src/provider/mod.rs` | `Provider` trait and core types |
+| `src/provider/registry.rs` | `ProviderFactory` and `ProviderRegistry` |
+| `src/provider/config.rs` | `InstanceRequest`, `ImageSpec`, `ProviderTimeouts` |
+| `src/provider/error.rs` | `ProviderError` with specific types |
+| `src/provider/digitalocean.rs` | Reference implementation |
+
+### Provider Creation Flow
 
 ```rust
-#[async_trait]
-pub trait Provider: Send + Sync {
-    // Instance lifecycle
-    async fn create_instance(&self, config: &InstanceConfig) -> Result<Instance>;
-    async fn destroy_instance(&self, id: &str) -> Result<()>;
-    async fn get_instance(&self, id: &str) -> Result<Option<Instance>>;
-    async fn list_instances(&self) -> Result<Vec<Instance>>;
-    async fn wait_ready(&self, id: &str) -> Result<Instance>;
+// 1. Registry with registered factories
+let registry = ProviderRegistry::with_defaults();
 
-    // Snapshots
-    async fn create_snapshot(&self, instance_id: &str, name: &str) -> Result<Snapshot>;
-    async fn list_snapshots(&self) -> Result<Vec<Snapshot>>;
-    async fn delete_snapshot(&self, id: &str) -> Result<()>;
+// 2. Create provider by name
+let provider = registry.create_by_name(
+    "digitalocean",
+    &api_token,
+    ProviderTimeouts::default()
+)?;
+
+// 3. Use the provider
+let instance = provider.create_instance(&request).await?;
+```
+
+## Core Types
+
+### InstanceRequest
+
+Configuration for creating an instance (provider-agnostic):
+
+```rust
+pub struct InstanceRequest {
+    pub name: String,                        // Instance name
+    pub region: String,                      // Region/datacenter
+    pub size: String,                        // Instance type/size
+    pub image: ImageSpec,                    // OS image
+    pub user_data: Option<String>,           // Cloud-init script
+    pub labels: HashMap<String, String>,     // Tags/labels
 }
 ```
 
-### Data Types
+### ImageSpec
 
-**InstanceConfig** - Configuration for creating an instance:
+Provider-agnostic image specification:
 
 ```rust
-pub struct InstanceConfig {
-    pub name: String,
-    pub region: String,
-    pub size: String,
-    pub image: String,
-    pub ssh_keys: Vec<String>,
-    pub user_data: Option<String>,
-    pub tags: Vec<String>,
+pub enum ImageSpec {
+    Ubuntu(String),      // e.g., "24.04" → provider maps to slug
+    Debian(String),      // e.g., "12"
+    Custom(String),      // Provider-specific ID
+    Snapshot(String),    // Snapshot ID to restore from
 }
 ```
 
-**Instance** - Represents a running instance:
+### ProviderInstance
+
+Instance returned by the provider:
 
 ```rust
-pub struct Instance {
-    pub id: String,
-    pub name: String,
-    pub ip: String,
-    pub status: InstanceStatus,
-    pub region: String,
-    pub size: String,
-    pub created_at: DateTime<Utc>,
+pub struct ProviderInstance {
+    pub id: String,                          // Provider-specific ID
+    pub ip: IpAddr,                          // Public IP address
+    pub status: InstanceStatus,              // Current state
+    pub created_at: DateTime<Utc>,           // Timestamp
 }
 ```
 
-**Snapshot** - Represents a saved instance state:
+### InstanceStatus
+
+Possible instance states:
 
 ```rust
-pub struct Snapshot {
-    pub id: String,
-    pub name: String,
-    pub size_gb: u64,
-    pub created_at: DateTime<Utc>,
-    pub regions: Vec<String>,
+pub enum InstanceStatus {
+    New,                    // Being created
+    Active,                 // Running and ready
+    Off,                    // Powered off
+    Archive,                // Stopped/archived
+    Unknown(String),        // Provider-specific status
 }
+```
+
+### ProviderError
+
+Structured errors with retry information:
+
+```rust
+pub enum ProviderError {
+    Authentication { provider: String, message: String },
+    RateLimit { retry_after: Option<Duration> },
+    NotFound { resource_type: String, id: String },
+    QuotaExceeded { resource: String, message: String },
+    InvalidConfig { field: String, message: String },
+    Timeout { operation: String, elapsed: Duration },
+    Api { status: u16, message: String },
+    // ... others
+}
+
+// Useful helpers
+error.is_retryable()      // true for RateLimit, Timeout, Network
+error.retry_after()       // Duration to wait before retry
 ```
 
 ## Current Providers
 
-| Provider | Status | Location |
-|----------|--------|----------|
-| DigitalOcean | Stable | `src/provider/digitalocean.rs` |
-| Hetzner | Planned | - |
-| AWS EC2 | Planned | - |
-
-## Provider Factory
-
-Providers are instantiated through the factory function:
-
-```rust
-pub fn create_provider(config: &AppConfig) -> Result<Box<dyn Provider>> {
-    match config.provider.as_str() {
-        "digitalocean" => {
-            let token = get_api_token("DIGITALOCEAN_TOKEN")?;
-            Ok(Box::new(DigitalOceanProvider::new(&token)?))
-        }
-        "hetzner" => {
-            let token = get_api_token("HETZNER_TOKEN")?;
-            Ok(Box::new(HetznerProvider::new(&token)?))
-        }
-        _ => Err(SpuffError::Config(format!(
-            "Unknown provider: {}",
-            config.provider
-        ))),
-    }
-}
-```
+| Provider | Status | File | Env Var |
+|----------|--------|------|---------|
+| DigitalOcean | Stable | `digitalocean.rs` | `DIGITALOCEAN_TOKEN` |
+| Hetzner | Planned | - | `HETZNER_TOKEN` |
+| AWS EC2 | Planned | - | `AWS_ACCESS_KEY_ID` |
 
 ## Documentation
 
-- [Creating a Provider](creating-a-provider.md) - Step-by-step guide
-- [Provider API Reference](provider-api.md) - Detailed API documentation
-- [Testing Providers](testing-providers.md) - How to test your provider
+- **[Creating a Provider](creating-a-provider.md)** - Complete step-by-step guide
+- **[Provider API Reference](provider-api.md)** - Detailed documentation for each method
+- **[Testing Providers](testing-providers.md)** - Testing strategies with mocks
 
-## Contributing a Provider
+## Contributing
 
-We welcome contributions for new cloud providers! Before starting:
+Want to add support for a new provider? Follow these steps:
 
-1. Open an issue to discuss the provider
-2. Review existing implementations (DigitalOcean is the reference)
-3. Follow the [Creating a Provider](creating-a-provider.md) guide
-4. Ensure comprehensive test coverage
-5. Add documentation and examples
+1. Open an issue to discuss the implementation
+2. Read the [Creating a Provider](creating-a-provider.md) guide
+3. Use the DigitalOcean implementation as reference
+4. Ensure adequate test coverage
+5. Update the documentation
+
+### Design Decisions
+
+Consult the ADR to understand architectural decisions:
+- [ADR-0005: Provider Trait Abstraction](../adr/0005-provider-trait-abstraction.md)

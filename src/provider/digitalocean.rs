@@ -29,11 +29,13 @@ pub struct DigitalOceanProvider {
 
 impl DigitalOceanProvider {
     /// Create a new DigitalOcean provider with default settings.
+    #[allow(dead_code)]
     pub fn new(token: &str) -> ProviderResult<Self> {
         Self::with_config(token, DEFAULT_API_BASE, ProviderTimeouts::default())
     }
 
     /// Create a new provider with custom base URL (for testing).
+    #[allow(dead_code)]
     pub fn with_base_url(token: &str, base_url: &str) -> ProviderResult<Self> {
         Self::with_config(token, base_url, ProviderTimeouts::default())
     }
@@ -383,7 +385,6 @@ impl Provider for DigitalOceanProvider {
                 created_at: DateTime::parse_from_rfc3339(&s.created_at)
                     .map(|dt| dt.with_timezone(&Utc))
                     .ok(),
-                size_gb: Some(s.size_gigabytes),
             })
             .collect())
     }
@@ -454,6 +455,7 @@ struct DropletResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DropletsResponse {
     droplets: Vec<DropletData>,
 }
@@ -488,6 +490,7 @@ struct SnapshotData {
     id: String,
     name: String,
     created_at: String,
+    #[allow(dead_code)]
     size_gigabytes: f64,
 }
 

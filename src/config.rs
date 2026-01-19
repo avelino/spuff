@@ -137,6 +137,7 @@ impl AppConfig {
     /// Validate the configuration.
     ///
     /// Returns an error if the configuration is invalid (e.g., unknown provider).
+    #[allow(dead_code)]
     pub fn validate(&self) -> Result<()> {
         // Validate provider
         if ProviderType::from_str(&self.provider).is_none() {
@@ -168,11 +169,13 @@ impl AppConfig {
     }
 
     /// Get the provider type enum.
+    #[allow(dead_code)]
     pub fn provider_type(&self) -> Option<ProviderType> {
         ProviderType::from_str(&self.provider)
     }
 
     /// Check if the configured provider is implemented.
+    #[allow(dead_code)]
     pub fn is_provider_implemented(&self) -> bool {
         self.provider_type()
             .map(|p| p.is_implemented())

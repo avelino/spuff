@@ -119,16 +119,19 @@ impl ProviderRegistry {
     }
 
     /// Get list of registered provider types
+    #[allow(dead_code)]
     pub fn registered_providers(&self) -> Vec<ProviderType> {
         self.factories.keys().copied().collect()
     }
 
     /// Check if a provider type is registered
+    #[allow(dead_code)]
     pub fn is_registered(&self, provider_type: ProviderType) -> bool {
         self.factories.contains_key(&provider_type)
     }
 
     /// Get list of implemented (ready to use) providers
+    #[allow(dead_code)]
     pub fn implemented_providers(&self) -> Vec<ProviderType> {
         self.factories
             .iter()

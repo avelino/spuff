@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 // Re-export commonly used types
 pub use config::{ImageSpec, InstanceRequest, ProviderTimeouts, ProviderType};
 pub use error::{ProviderError, ProviderResult};
-pub use registry::{ProviderFactory, ProviderRegistry};
+pub use registry::ProviderRegistry;
 
 use crate::config::AppConfig;
 
@@ -110,10 +110,6 @@ pub struct ProviderInstance {
     pub created_at: DateTime<Utc>,
 }
 
-/// Legacy Instance type alias for backward compatibility.
-#[deprecated(since = "0.2.0", note = "Use ProviderInstance instead")]
-pub type Instance = ProviderInstance;
-
 /// Instance lifecycle status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstanceStatus {
@@ -152,9 +148,6 @@ pub struct Snapshot {
 
     /// When the snapshot was created
     pub created_at: Option<DateTime<Utc>>,
-
-    /// Snapshot size in GB
-    pub size_gb: Option<f64>,
 }
 
 /// Core trait that all cloud providers must implement.
@@ -165,6 +158,7 @@ pub struct Snapshot {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Get the provider name
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
     /// Create a new instance.
@@ -185,6 +179,7 @@ pub trait Provider: Send + Sync {
     async fn get_instance(&self, id: &str) -> ProviderResult<Option<ProviderInstance>>;
 
     /// List all instances with the "spuff" tag.
+    #[allow(dead_code)]
     async fn list_instances(&self) -> ProviderResult<Vec<ProviderInstance>>;
 
     /// Wait for an instance to be ready (active status + IP assigned).
@@ -211,11 +206,13 @@ pub trait Provider: Send + Sync {
     /// Get provider-specific SSH key IDs configured in the account.
     ///
     /// Default implementation returns empty list (use cloud-init for keys).
+    #[allow(dead_code)]
     async fn get_ssh_keys(&self) -> ProviderResult<Vec<String>> {
         Ok(vec![])
     }
 
     /// Check if the provider supports snapshots.
+    #[allow(dead_code)]
     fn supports_snapshots(&self) -> bool {
         true
     }
@@ -236,18 +233,6 @@ pub trait Provider: Send + Sync {
 pub fn create_provider(config: &AppConfig) -> crate::error::Result<Box<dyn Provider>> {
     let registry = ProviderRegistry::with_defaults();
     let timeouts = ProviderTimeouts::default();
-
-    registry
-        .create_by_name(&config.provider, &config.api_token, timeouts)
-        .map_err(|e| crate::error::SpuffError::Provider(e.to_string()))
-}
-
-/// Create a provider with custom timeouts.
-pub fn create_provider_with_timeouts(
-    config: &AppConfig,
-    timeouts: ProviderTimeouts,
-) -> crate::error::Result<Box<dyn Provider>> {
-    let registry = ProviderRegistry::with_defaults();
 
     registry
         .create_by_name(&config.provider, &config.api_token, timeouts)

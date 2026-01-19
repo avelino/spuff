@@ -28,6 +28,7 @@ pub enum ProviderError {
 
     /// Quota or limit exceeded
     #[error("Quota exceeded for {resource}: {message}")]
+    #[allow(dead_code)]
     QuotaExceeded { resource: String, message: String },
 
     /// Invalid configuration or request parameters
@@ -36,6 +37,7 @@ pub enum ProviderError {
 
     /// Feature not supported by this provider
     #[error("Feature not supported: {feature}")]
+    #[allow(dead_code)]
     NotSupported { feature: String },
 
     /// Operation timed out
@@ -103,6 +105,7 @@ impl ProviderError {
     }
 
     /// Create a quota exceeded error
+    #[allow(dead_code)]
     pub fn quota(resource: impl Into<String>, message: impl Into<String>) -> Self {
         Self::QuotaExceeded {
             resource: resource.into(),
@@ -119,6 +122,7 @@ impl ProviderError {
     }
 
     /// Check if this error is retryable
+    #[allow(dead_code)]
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -127,6 +131,7 @@ impl ProviderError {
     }
 
     /// Get retry delay if applicable
+    #[allow(dead_code)]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimit { retry_after } => *retry_after,

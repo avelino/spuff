@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::devtools::DevToolsConfig;
 use crate::metrics::get_top_processes;
 use crate::AppState;
 
@@ -36,10 +37,14 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .route("/status", get(status))
         .route("/processes", get(processes))
         .route("/exec", post(exec))
+        .route("/exec-log", get(exec_log))
         .route("/heartbeat", post(heartbeat))
         .route("/logs", get(logs))
         .route("/cloud-init", get(cloud_init_status))
         .route("/activity", get(activity_log))
+        // Devtools management
+        .route("/devtools", get(devtools_status))
+        .route("/devtools/install", post(devtools_install))
 }
 
 /// Custom extractor that validates authentication before allowing access to state.
@@ -268,6 +273,72 @@ async fn exec(
     }
 }
 
+/// Query parameters for the /exec-log endpoint.
+#[derive(Debug, Deserialize)]
+struct ExecLogQuery {
+    /// Number of lines to return (default: 50, max: 500)
+    lines: Option<usize>,
+}
+
+/// Exec log entry parsed from file
+#[derive(Debug, Serialize)]
+struct ExecLogEntry {
+    timestamp: String,
+    event: String,
+    details: String,
+}
+
+/// GET /exec-log - Get command execution history (requires authentication)
+///
+/// Returns the persistent log of all exec commands for tracking and auditing.
+async fn exec_log(
+    AuthenticatedState(state): AuthenticatedState,
+    Query(query): Query<ExecLogQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    let lines = query.lines.unwrap_or(50).min(500);
+    let log_path = Path::new("/var/log/spuff-exec.log");
+
+    if !log_path.exists() {
+        return Ok(Json(serde_json::json!({
+            "entries": [],
+            "count": 0,
+            "message": "No exec history yet"
+        })));
+    }
+
+    let lines_vec = read_last_lines(log_path, lines).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError::new(format!("Failed to read exec log: {}", e))),
+        )
+    })?;
+
+    // Parse TSV format: timestamp\tevent\tdetails
+    let entries: Vec<ExecLogEntry> = lines_vec
+        .into_iter()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() >= 2 {
+                Some(ExecLogEntry {
+                    timestamp: parts[0].to_string(),
+                    event: parts[1].to_string(),
+                    details: parts.get(2).unwrap_or(&"").to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let count = entries.len();
+    Ok(Json(serde_json::json!({
+        "entries": entries,
+        "count": count
+    })))
+}
+
 /// POST /heartbeat - Update activity timestamp (requires authentication)
 ///
 /// Called by clients to indicate they are still active, resetting the idle timer.
@@ -471,6 +542,50 @@ async fn activity_log(
         "entries": entries,
         "count": entries.len()
     }))
+}
+
+/// GET /devtools - Get devtools installation status (requires authentication)
+///
+/// Returns the current status of all devtools installations.
+async fn devtools_status(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+    let devtools_state = state.devtools.get_state().await;
+    Json(devtools_state)
+}
+
+/// POST /devtools/install - Start devtools installation (requires authentication)
+///
+/// Starts async installation of configured devtools.
+/// Returns immediately; poll GET /devtools for status.
+async fn devtools_install(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(config): Json<DevToolsConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    // Log the installation request
+    state.log_activity(
+        "devtools_install",
+        Some(format!(
+            "docker={} shell_tools={} nodejs={} claude_code={} env={:?}",
+            config.docker, config.shell_tools, config.nodejs, config.claude_code, config.environment
+        ))
+    ).await;
+
+    match state.devtools.install(config).await {
+        Ok(()) => {
+            Ok(Json(serde_json::json!({
+                "status": "started",
+                "message": "Devtools installation started. Poll GET /devtools for status."
+            })))
+        }
+        Err(e) => {
+            Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new(e)),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

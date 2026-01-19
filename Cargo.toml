@@ -56,10 +56,6 @@ crossterm = "0.28"
 # Templates
 tera = "1"
 
-# SSH
-russh = "0.46"
-russh-keys = "0.46"
-
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 

@@ -7,6 +7,7 @@
 //! - Cloud-init status
 //! - Activity tracking for idle detection
 //! - Activity log for transparency
+//! - Devtools installation management
 //!
 //! # Authentication
 //!
@@ -19,8 +20,10 @@
 //! Environment variables:
 //! - `SPUFF_AGENT_TOKEN`: Authentication token (optional, disables auth if unset)
 //! - `SPUFF_AGENT_PORT`: Listen port (default: 7575)
+//! - `SPUFF_AGENT_USER`: Username for devtools installation (default: from /opt/spuff/username)
 //! - `RUST_LOG`: Log level (default: spuff_agent=info,tower_http=info)
 
+mod devtools;
 mod metrics;
 mod routes;
 
@@ -33,10 +36,14 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::devtools::DevToolsManager;
 use crate::metrics::SystemMetrics;
 
-/// Maximum number of activity log entries to keep
+/// Maximum number of activity log entries to keep in memory
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
+
+/// File path for persistent exec log
+const EXEC_LOG_FILE: &str = "/var/log/spuff-exec.log";
 
 /// An entry in the activity log
 #[derive(Debug, Clone, Serialize)]
@@ -68,17 +75,20 @@ pub struct AppState {
     pub auth_token: Option<String>,
     /// Activity log for transparency (ring buffer)
     pub activity_log: RwLock<VecDeque<ActivityLogEntry>>,
+    /// Devtools installation manager
+    pub devtools: DevToolsManager,
 }
 
 impl AppState {
-    /// Creates a new AppState with the given authentication token.
-    fn new(auth_token: Option<String>) -> Self {
+    /// Creates a new AppState with the given authentication token and username.
+    fn new(auth_token: Option<String>, username: String) -> Self {
         Self {
             last_activity: RwLock::new(chrono::Utc::now()),
             start_time: chrono::Utc::now(),
             metrics: RwLock::new(SystemMetrics::collect()),
             auth_token,
             activity_log: RwLock::new(VecDeque::with_capacity(MAX_ACTIVITY_LOG_ENTRIES)),
+            devtools: DevToolsManager::new(username),
         }
     }
 
@@ -101,12 +111,41 @@ impl AppState {
 
     /// Log an activity event
     pub async fn log_activity(&self, event: impl Into<String>, details: Option<String>) {
-        let entry = ActivityLogEntry::new(event, details);
+        let event_str = event.into();
+        let entry = ActivityLogEntry::new(event_str.clone(), details.clone());
+
+        // Persist exec-related events to file for tracking
+        if event_str.starts_with("exec") {
+            self.persist_exec_log(&entry);
+        }
+
         let mut log = self.activity_log.write().await;
         if log.len() >= MAX_ACTIVITY_LOG_ENTRIES {
             log.pop_front();
         }
         log.push_back(entry);
+    }
+
+    /// Persist exec log entry to file for tracking
+    fn persist_exec_log(&self, entry: &ActivityLogEntry) {
+        use std::io::Write;
+
+        let log_line = format!(
+            "{}\t{}\t{}\n",
+            entry.timestamp.to_rfc3339(),
+            entry.event,
+            entry.details.as_deref().unwrap_or("")
+        );
+
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(EXEC_LOG_FILE)
+        {
+            let _ = file.write_all(log_line.as_bytes());
+        } else {
+            tracing::warn!("Failed to write to exec log file: {}", EXEC_LOG_FILE);
+        }
     }
 
     /// Get recent activity log entries
@@ -138,6 +177,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(7575);
 
+    // Get username for devtools installation
+    let username = std::env::var("SPUFF_AGENT_USER")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/opt/spuff/username").ok().map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| "dev".to_string());
+
     if auth_token.is_some() {
         tracing::info!("Authentication enabled via SPUFF_AGENT_TOKEN");
     } else {
@@ -147,7 +192,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let state = Arc::new(AppState::new(auth_token));
+    tracing::info!("Devtools username: {}", username);
+
+    let state = Arc::new(AppState::new(auth_token, username));
 
     // Log agent startup
     {

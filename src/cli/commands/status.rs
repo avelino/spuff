@@ -8,21 +8,46 @@ use crate::state::StateDb;
 use crate::utils::format_elapsed;
 
 #[derive(Debug, Deserialize)]
+struct DevToolsState {
+    started: bool,
+    completed: bool,
+    tools: Vec<DevTool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevTool {
+    #[allow(dead_code)]
+    id: String,
+    name: String,
+    status: DevToolStatus,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum DevToolStatus {
+    Pending,
+    Installing,
+    Done,
+    Failed(String),
+    Skipped,
+}
+
+#[derive(Debug, Deserialize)]
 struct BootstrapStatus {
     #[serde(default)]
     bootstrap_status: String,
     #[serde(default)]
+    #[allow(dead_code)]
     bootstrap_ready: bool,
 }
 
-/// Bootstrap steps in order of execution
+/// Bootstrap steps in order of execution (minimal bootstrap)
+/// Devtools are now installed via agent after bootstrap completes
 const BOOTSTRAP_STEPS: &[(&str, &str)] = &[
     ("starting", "Starting bootstrap"),
-    ("installing:parallel", "Installing tools (Docker, fzf, bat, eza...)"),
-    ("installing:devenv", "Installing dev environment (Node.js, Claude Code)"),
     ("installing:agent", "Installing spuff-agent"),
-    ("installing:dotfiles", "Configuring dotfiles"),
-    ("installing:tailscale", "Setting up Tailscale"),
     ("ready", "Bootstrap complete"),
 ];
 
@@ -85,6 +110,14 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
                     if bootstrap.bootstrap_status != "ready" {
                         println!();
                         print_bootstrap_checklist(&bootstrap.bootstrap_status);
+                    }
+
+                    // Show devtools status if bootstrap is ready
+                    if bootstrap.bootstrap_status == "ready" {
+                        if let Ok(devtools) = get_devtools_status(&instance.ip, config).await {
+                            println!();
+                            print_devtools_status(&devtools);
+                        }
                     }
                 }
             }
@@ -205,4 +238,78 @@ async fn get_bootstrap_status(ip: &str, config: &AppConfig) -> Result<BootstrapS
     serde_json::from_str(&output).map_err(|e| {
         crate::error::SpuffError::Provider(format!("Failed to parse agent response: {}", e))
     })
+}
+
+async fn get_devtools_status(ip: &str, config: &AppConfig) -> Result<DevToolsState> {
+    let output = crate::connector::ssh::run_command(
+        ip,
+        config,
+        "curl -s http://127.0.0.1:7575/devtools 2>/dev/null || echo '{\"started\":false,\"completed\":false,\"tools\":[]}'",
+    )
+    .await?;
+
+    serde_json::from_str(&output).map_err(|e| {
+        crate::error::SpuffError::Provider(format!("Failed to parse devtools response: {}", e))
+    })
+}
+
+fn print_devtools_status(devtools: &DevToolsState) {
+    if !devtools.started {
+        println!("  {}", style("Devtools: not started").dim());
+        println!("  {}", style("Run 'spuff agent devtools install' to start").dim());
+        return;
+    }
+
+    let status_text = if devtools.completed {
+        style("Devtools: installed").green()
+    } else {
+        style("Devtools: installing...").yellow()
+    };
+
+    println!("  {}", status_text);
+    println!();
+
+    // Count stats
+    let done = devtools.tools.iter().filter(|t| t.status == DevToolStatus::Done).count();
+    let installing = devtools.tools.iter().filter(|t| t.status == DevToolStatus::Installing).count();
+    let failed = devtools.tools.iter().filter(|t| matches!(t.status, DevToolStatus::Failed(_))).count();
+    let total = devtools.tools.iter().filter(|t| t.status != DevToolStatus::Skipped).count();
+
+    if total > 0 {
+        println!(
+            "  {} {}/{} installed{}{}",
+            style("→").dim(),
+            done,
+            total,
+            if installing > 0 { format!(", {} installing", installing) } else { String::new() },
+            if failed > 0 { format!(", {} failed", style(failed).red()) } else { String::new() },
+        );
+    }
+
+    // Show individual tools
+    for tool in &devtools.tools {
+        if tool.status == DevToolStatus::Skipped {
+            continue;
+        }
+
+        let (icon, name_style) = match &tool.status {
+            DevToolStatus::Done => (style("[x]").green(), style(&tool.name).green()),
+            DevToolStatus::Installing => (style("[>]").yellow().bold(), style(&tool.name).yellow().bold()),
+            DevToolStatus::Pending => (style("[ ]").dim(), style(&tool.name).dim()),
+            DevToolStatus::Failed(_) => (style("[!]").red(), style(&tool.name).red()),
+            DevToolStatus::Skipped => continue,
+        };
+
+        let version_str = tool.version.as_ref()
+            .map(|v| format!(" ({})", style(v).dim()))
+            .unwrap_or_default();
+
+        let error_str = if let DevToolStatus::Failed(e) = &tool.status {
+            format!(" - {}", style(e).red())
+        } else {
+            String::new()
+        };
+
+        println!("    {} {}{}{}", icon, name_style, version_str, error_str);
+    }
 }

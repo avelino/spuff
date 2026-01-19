@@ -66,6 +66,7 @@ impl InstanceRequest {
     }
 
     /// Add multiple labels
+    #[allow(dead_code)]
     pub fn with_labels(mut self, labels: HashMap<String, String>) -> Self {
         self.labels.extend(labels);
         self
@@ -104,6 +105,7 @@ impl ImageSpec {
     }
 
     /// Create Debian image spec
+    #[allow(dead_code)]
     pub fn debian(version: impl Into<String>) -> Self {
         Self::Debian(version.into())
     }
@@ -138,9 +140,11 @@ pub struct ProviderTimeouts {
     pub http_request: Duration,
 
     /// SSH connection timeout
+    #[allow(dead_code)]
     pub ssh_connect: Duration,
 
     /// Cloud-init completion timeout
+    #[allow(dead_code)]
     pub cloud_init: Duration,
 }
 
@@ -214,6 +218,7 @@ impl ProviderType {
     }
 
     /// Get the environment variable name for the API token
+    #[allow(dead_code)]
     pub fn token_env_var(&self) -> &'static str {
         match self {
             Self::DigitalOcean => "DIGITALOCEAN_TOKEN",

@@ -19,14 +19,9 @@ const STEP_WAIT_READY: usize = 2;
 const STEP_WAIT_SSH: usize = 3;
 const STEP_BOOTSTRAP: usize = 4;
 
-// Bootstrap sub-steps (indices)
+// Bootstrap sub-steps (indices) - minimal bootstrap, devtools installed via agent
 const SUB_PACKAGES: usize = 0;
-const SUB_DOCKER: usize = 1;
-const SUB_SHELL_TOOLS: usize = 2;
-const SUB_DEVENV: usize = 3;
-const SUB_NODEJS: usize = 4;
-const SUB_CLAUDE: usize = 5;
-const SUB_AGENT: usize = 6;
+const SUB_AGENT: usize = 1;
 
 pub async fn execute(
     config: &AppConfig,
@@ -452,14 +447,9 @@ async fn provision_instance(
         .await
         .ok();
 
-    // Define sub-steps for bootstrap
+    // Define sub-steps for bootstrap (minimal - devtools installed via agent)
     let sub_steps = vec![
         "Updating packages".to_string(),
-        "Installing Docker".to_string(),
-        "Installing shell tools".to_string(),
-        format!("Installing {}", get_devenv_name(&config.environment)),
-        "Installing Node.js".to_string(),
-        "Installing Claude Code".to_string(),
         "Installing spuff-agent".to_string(),
     ];
 
@@ -476,6 +466,16 @@ async fn provision_instance(
     tx.send(ProgressMessage::SetStep(STEP_BOOTSTRAP, StepState::Done))
         .await
         .ok();
+
+    // Trigger devtools installation via agent (async, non-blocking)
+    tx.send(ProgressMessage::SetDetail("Triggering devtools installation...".to_string()))
+        .await
+        .ok();
+
+    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), config).await {
+        tracing::warn!("Failed to trigger devtools installation: {}", e);
+        // Don't fail - user can trigger manually with `spuff agent devtools install`
+    }
 
     // Complete!
     tx.send(ProgressMessage::Complete(
@@ -520,29 +520,16 @@ fn get_image_spec(provider: &str, snapshot: Option<String>) -> ImageSpec {
     }
 }
 
-fn get_devenv_name(environment: &str) -> &'static str {
-    match environment {
-        "nix" => "Nix",
-        "devbox" => "Devbox",
-        _ => "dev tools",
-    }
-}
-
 async fn wait_for_cloud_init_with_progress(
     ip: &str,
     config: &AppConfig,
     tx: &mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
-    let max_attempts = 120; // 10 minutes max
+    let max_attempts = 60; // 5 minutes max (faster now with minimal bootstrap)
     let delay = Duration::from_secs(5);
 
     // Track which sub-steps have been completed
     let mut packages_done = false;
-    let mut docker_done = false;
-    let mut shell_tools_done = false;
-    let mut devenv_done = false;
-    let mut nodejs_done = false;
-    let mut claude_done = false;
     let mut agent_done = false;
 
     // Start first sub-step
@@ -557,95 +544,12 @@ async fn wait_for_cloud_init_with_progress(
         // Check cloud-init log for progress
         if let Ok(log) = get_cloud_init_log(ip, config).await {
             // Check for package updates completion
-            if !packages_done && (log.contains("apt-get update") || log.contains("package_update")) {
-                if log.contains("Setting up") || log.contains("Unpacking") {
-                    packages_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_DOCKER, StepState::InProgress))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetDetail("Installing Docker...".to_string()))
-                        .await
-                        .ok();
-                }
-            }
-
-            // Check for Docker installation
-            if !docker_done && log.contains("get.docker.com") {
-                if log.contains("docker.service") || log.contains("usermod -aG docker") {
-                    docker_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_DOCKER, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_SHELL_TOOLS, StepState::InProgress))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetDetail("Installing fzf, bat, eza, starship...".to_string()))
-                        .await
-                        .ok();
-                }
-            }
-
-            // Check for shell tools installation
-            if !shell_tools_done && docker_done {
-                if log.contains("starship") || log.contains("zoxide") || log.contains(".fzf/install") {
-                    shell_tools_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_SHELL_TOOLS, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_DEVENV, StepState::InProgress))
-                        .await
-                        .ok();
-                    let devenv_name = get_devenv_name(&config.environment);
-                    tx.send(ProgressMessage::SetDetail(format!("Installing {}...", devenv_name)))
-                        .await
-                        .ok();
-                }
-            }
-
-            // Check for devenv (devbox/nix) installation
-            if !devenv_done && shell_tools_done {
-                let devenv_installed = match config.environment.as_str() {
-                    "devbox" => log.contains("devbox version") || log.contains("jetify.com/devbox"),
-                    "nix" => log.contains("determinate.systems/nix") || log.contains("nix-daemon"),
-                    _ => true, // Skip if no devenv configured
-                };
-                if devenv_installed {
-                    devenv_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_DEVENV, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_NODEJS, StepState::InProgress))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetDetail("Installing Node.js...".to_string()))
-                        .await
-                        .ok();
-                }
-            }
-
-            // Check for Node.js installation
-            if !nodejs_done && log.contains("nodesource.com") {
-                if log.contains("nodejs") && log.contains("Setting up") {
-                    nodejs_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_NODEJS, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_CLAUDE, StepState::InProgress))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetDetail("Installing Claude Code...".to_string()))
-                        .await
-                        .ok();
-                }
-            }
-
-            // Check for Claude Code installation
-            if !claude_done && log.contains("claude-code") {
-                claude_done = true;
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_CLAUDE, StepState::Done))
+            if !packages_done
+                && (log.contains("apt-get update") || log.contains("package_update"))
+                && (log.contains("Setting up") || log.contains("Unpacking"))
+            {
+                packages_done = true;
+                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::Done))
                     .await
                     .ok();
                 tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::InProgress))
@@ -657,22 +561,23 @@ async fn wait_for_cloud_init_with_progress(
             }
 
             // Check for spuff-agent installation
-            if !agent_done && log.contains("spuff-agent") {
-                if log.contains("systemctl enable spuff-agent") || log.contains("systemctl start spuff-agent") {
-                    agent_done = true;
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::Done))
-                        .await
-                        .ok();
-                    tx.send(ProgressMessage::SetDetail("Finalizing...".to_string()))
-                        .await
-                        .ok();
-                }
+            if !agent_done
+                && log.contains("spuff-agent")
+                && (log.contains("systemctl enable spuff-agent") || log.contains("systemctl start spuff-agent"))
+            {
+                agent_done = true;
+                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::Done))
+                    .await
+                    .ok();
+                tx.send(ProgressMessage::SetDetail("Finalizing...".to_string()))
+                    .await
+                    .ok();
             }
 
             // Check if cloud-init is done
             if log.contains("spuff environment ready") || log.contains("final_message") {
                 // Mark any remaining sub-steps as done
-                for i in 0..7 {
+                for i in 0..2 {
                     tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
                         .await
                         .ok();
@@ -684,7 +589,7 @@ async fn wait_for_cloud_init_with_progress(
         // Also check cloud-init status
         if let Ok(true) = check_cloud_init_status(ip, config).await {
             // Mark any remaining sub-steps as done
-            for i in 0..7 {
+            for i in 0..2 {
                 tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
                     .await
                     .ok();
@@ -906,47 +811,6 @@ async fn add_key_to_agent(config: &AppConfig) -> Result<()> {
     }
 }
 
-/// Try SSH connection interactively (allows password prompt)
-pub async fn try_ssh_interactive(host: &str, config: &AppConfig) -> Result<()> {
-    println!(
-        "\n{} Testing SSH connection to {}...",
-        style("→").cyan().bold(),
-        style(host).yellow()
-    );
-
-    let status = Command::new("ssh")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, host))
-        .arg("echo ok")
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "{} SSH connection verified!\n",
-                style("✓").green().bold()
-            );
-            Ok(())
-        }
-        _ => Err(SpuffError::Ssh(
-            "SSH connection failed. Check your key and try again.".to_string(),
-        )),
-    }
-}
-
 /// Upload local spuff-agent binary and ensure the service is running
 async fn upload_local_agent(ip: &str, config: &AppConfig, agent_path: &str) -> Result<()> {
     // Ensure /opt/spuff exists
@@ -973,4 +837,48 @@ async fn upload_local_agent(ip: &str, config: &AppConfig, agent_path: &str) -> R
     .await?;
 
     Ok(())
+}
+
+/// Trigger devtools installation via the agent
+///
+/// Reads the devtools config from /opt/spuff/devtools.json and sends it to the agent's
+/// /devtools/install endpoint. The agent will install tools asynchronously in the background.
+async fn trigger_devtools_installation(ip: &str, config: &AppConfig) -> Result<()> {
+    // Read devtools config from the VM
+    let devtools_json = crate::connector::ssh::run_command(
+        ip,
+        config,
+        "cat /opt/spuff/devtools.json 2>/dev/null || echo '{}'",
+    )
+    .await?;
+
+    // Parse to validate it's valid JSON
+    let devtools_config: serde_json::Value = serde_json::from_str(&devtools_json)
+        .map_err(|e| SpuffError::Provider(format!("Invalid devtools.json: {}", e)))?;
+
+    // Skip if config is empty
+    if devtools_config.as_object().is_none_or(|o| o.is_empty()) {
+        tracing::debug!("No devtools config found, skipping installation trigger");
+        return Ok(());
+    }
+
+    // Call the agent's devtools install endpoint via SSH tunnel
+    let curl_cmd = format!(
+        r#"curl -s -X POST http://127.0.0.1:7575/devtools/install \
+           -H "Content-Type: application/json" \
+           -d '{}'"#,
+        devtools_json.trim()
+    );
+
+    let result = crate::connector::ssh::run_command(ip, config, &curl_cmd).await?;
+
+    // Check for success
+    if result.contains("\"started\":true") || result.contains("already in progress") {
+        tracing::info!("Devtools installation triggered successfully");
+        Ok(())
+    } else {
+        tracing::warn!("Devtools install response: {}", result);
+        // Don't fail even if the response is unexpected
+        Ok(())
+    }
 }

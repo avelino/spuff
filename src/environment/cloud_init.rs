@@ -11,30 +11,48 @@ package_upgrade: false
 disable_root: true
 ssh_pwauth: false
 
+# Minimal packages - devtools installed via agent
 packages:
   - git
   - curl
   - unzip
   - zip
   - build-essential
-  - ripgrep
-  - fd-find
+  - mosh
   - jq
   - htop
-  - tree
-  - mosh
 
 users:
   - name: {{ username }}
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    groups: [sudo, docker]
+    groups: [sudo]
     lock_passwd: true
     ssh_authorized_keys:
       - {{ ssh_public_key }}
 
 write_files:
-  # Bootstrap script - runs async after cloud-init
+  # Store username for agent devtools installation
+  - path: /opt/spuff/username
+    permissions: '0644'
+    content: "{{ username }}"
+
+  # Devtools configuration for agent
+  - path: /opt/spuff/devtools.json
+    permissions: '0644'
+    content: |
+      {
+        "docker": true,
+        "shell_tools": true,
+        "nodejs": true,
+        "claude_code": true,
+        "environment": {% if environment %}"{{ environment }}"{% else %}null{% endif %},
+        "dotfiles": {% if dotfiles %}"{{ dotfiles }}"{% else %}null{% endif %},
+        "tailscale": {% if tailscale_enabled %}true{% else %}false{% endif %},
+        "tailscale_authkey": {% if tailscale_authkey %}"{{ tailscale_authkey }}"{% else %}null{% endif %}
+      }
+
+  # Bootstrap script - minimal setup + agent start
   - path: /opt/spuff/bootstrap.sh
     permissions: '0755'
     content: |
@@ -58,130 +76,10 @@ write_files:
       update_status "starting"
       exec > >(tee -a "$LOG_FILE") 2>&1
 
-      ###################
-      # PARALLEL PHASE 1: Heavy downloads/installs
-      ###################
-      update_status "installing:parallel"
-
-      # Docker (background)
-      (
-        log "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh
-        usermod -aG docker "$USERNAME"
-        log "Docker installed"
-      ) &
-      PID_DOCKER=$!
-
-      # Shell tools (parallel)
-      (
-        log "Installing fzf..."
-        git clone --depth 1 https://github.com/junegunn/fzf.git /home/$USERNAME/.fzf
-        chown -R $USERNAME:$USERNAME /home/$USERNAME/.fzf
-        su - $USERNAME -c "/home/$USERNAME/.fzf/install --all --no-update-rc"
-        log "fzf installed"
-      ) &
-      PID_FZF=$!
-
-      (
-        log "Installing bat..."
-        BAT_VERSION="0.24.0"
-        ARCH=$(dpkg --print-architecture)
-        curl -fsSL "https://github.com/sharkdp/bat/releases/download/v${BAT_VERSION}/bat_${BAT_VERSION}_${ARCH}.deb" -o /tmp/bat.deb
-        dpkg -i /tmp/bat.deb || true
-        rm -f /tmp/bat.deb
-        log "bat installed"
-      ) &
-      PID_BAT=$!
-
-      (
-        log "Installing eza..."
-        EZA_VERSION="0.20.13"
-        ARCH=$(uname -m)
-        case $ARCH in
-          x86_64) EZA_ARCH="x86_64" ;;
-          aarch64) EZA_ARCH="aarch64" ;;
-          *) EZA_ARCH="" ;;
-        esac
-        if [ -n "$EZA_ARCH" ]; then
-          curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VERSION}/eza_${EZA_ARCH}-unknown-linux-gnu.zip" -o /tmp/eza.zip
-          unzip -o /tmp/eza.zip -d /tmp/eza
-          mv /tmp/eza/eza /usr/local/bin/
-          chmod +x /usr/local/bin/eza
-          rm -rf /tmp/eza /tmp/eza.zip
-        fi
-        log "eza installed"
-      ) &
-      PID_EZA=$!
-
-      (
-        log "Installing zoxide..."
-        curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
-        mv ~/.local/bin/zoxide /usr/local/bin/ 2>/dev/null || true
-        log "zoxide installed"
-      ) &
-      PID_ZOXIDE=$!
-
-      (
-        log "Installing starship..."
-        curl -sS https://starship.rs/install.sh | sh -s -- -y
-        log "starship installed"
-      ) &
-      PID_STARSHIP=$!
-
-      # Wait for shell tools (they're fast)
-      log "Waiting for shell tools..."
-      wait $PID_FZF $PID_BAT $PID_EZA $PID_ZOXIDE $PID_STARSHIP 2>/dev/null || true
-      log "Shell tools completed"
+      log "Starting minimal bootstrap for user: $USERNAME"
 
       ###################
-      # PARALLEL PHASE 2: Dev environment + Node.js
-      ###################
-      update_status "installing:devenv"
-
-{% if environment == "devbox" %}
-      (
-        log "Installing Devbox..."
-        curl -fsSL https://get.jetify.com/devbox | bash -s -- -f
-        su - $USERNAME -c "devbox version" || true
-        log "Devbox installed"
-      ) &
-      PID_DEVENV=$!
-{% elif environment == "nix" %}
-      (
-        log "Installing Nix..."
-        curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install --no-confirm
-        echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' >> /home/$USERNAME/.bashrc
-        log "Nix installed"
-      ) &
-      PID_DEVENV=$!
-{% endif %}
-
-      (
-        log "Installing Node.js..."
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-        apt-get install -y nodejs
-        log "Node.js installed"
-
-        log "Installing Claude Code..."
-        npm install -g @anthropic-ai/claude-code || true
-        log "Claude Code installed"
-      ) &
-      PID_NODE=$!
-
-      # Wait for Docker (needed for user group)
-      log "Waiting for Docker..."
-      wait $PID_DOCKER 2>/dev/null || true
-
-{% if environment == "devbox" or environment == "nix" %}
-      log "Waiting for dev environment..."
-      wait $PID_DEVENV 2>/dev/null || true
-{% endif %}
-
-      log "Waiting for Node.js/Claude..."
-      wait $PID_NODE 2>/dev/null || true
-
-      ###################
-      # SEQUENTIAL: Final setup
+      # Install spuff-agent
       ###################
       update_status "installing:agent"
 
@@ -212,38 +110,16 @@ write_files:
       systemctl start spuff-agent || true
       log "spuff-agent started"
 
-{% if dotfiles %}
-      update_status "installing:dotfiles"
-      log "Cloning dotfiles..."
-      su - $USERNAME -c "git clone {{ dotfiles }} ~/.dotfiles" || true
-      if [ -f /home/$USERNAME/.dotfiles/install.sh ]; then
-        su - $USERNAME -c "cd ~/.dotfiles && ./install.sh" || true
-      elif [ -f /home/$USERNAME/.dotfiles/setup.sh ]; then
-        su - $USERNAME -c "cd ~/.dotfiles && ./setup.sh" || true
-      fi
-      log "Dotfiles configured"
-{% endif %}
-
-{% if tailscale_enabled %}
-      update_status "installing:tailscale"
-      log "Installing Tailscale..."
-      curl -fsSL https://tailscale.com/install.sh | sh
-      {% if tailscale_authkey %}
-      TS_AUTHKEY='{{ tailscale_authkey }}' tailscale up --authkey="$TS_AUTHKEY"
-      {% endif %}
-      log "Tailscale configured"
-{% endif %}
-
-      # Done!
+      # Agent is ready - devtools will be installed via agent API
       update_status "ready"
-      log "Bootstrap completed!"
+      log "Bootstrap completed! Devtools will be installed via agent."
 
   # Bootstrap service
   - path: /etc/systemd/system/spuff-bootstrap.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=Spuff Bootstrap - Async environment setup
+      Description=Spuff Bootstrap - Minimal environment setup
       After=network-online.target cloud-final.service
       Wants=network-online.target
 
@@ -644,8 +520,9 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("Installing Devbox"));
-        assert!(result.contains("get.jetify.com/devbox"));
+        // Environment is now stored in devtools.json for agent to install
+        assert!(result.contains("devtools.json"));
+        assert!(result.contains("\"environment\": \"devbox\""));
     }
 
     #[test]
@@ -659,8 +536,9 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("Installing Nix"));
-        assert!(result.contains("install.determinate.systems/nix"));
+        // Environment is now stored in devtools.json for agent to install
+        assert!(result.contains("devtools.json"));
+        assert!(result.contains("\"environment\": \"nix\""));
     }
 
     #[test]
@@ -674,8 +552,9 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("dotfiles"));
-        assert!(result.contains("git clone https://github.com/user/dotfiles ~/.dotfiles"));
+        // Dotfiles URL is now stored in devtools.json for agent to install
+        assert!(result.contains("devtools.json"));
+        assert!(result.contains("\"dotfiles\": \"https://github.com/user/dotfiles\""));
     }
 
     #[test]
@@ -689,7 +568,8 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(!result.contains("Cloning dotfiles"));
+        // When no dotfiles, devtools.json should have null
+        assert!(result.contains("\"dotfiles\": null"));
     }
 
     #[test]
@@ -704,10 +584,10 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("Installing Tailscale"));
-        // Authkey is passed via environment variable for security
-        assert!(result.contains("TS_AUTHKEY='tskey-abc123'"));
-        assert!(result.contains("--authkey=\"$TS_AUTHKEY\""));
+        // Tailscale config is now stored in devtools.json for agent to install
+        assert!(result.contains("devtools.json"));
+        assert!(result.contains("\"tailscale\": true"));
+        assert!(result.contains("\"tailscale_authkey\": \"tskey-abc123\""));
     }
 
     #[test]
@@ -721,11 +601,12 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(!result.contains("Installing Tailscale"));
+        // Tailscale disabled in devtools.json
+        assert!(result.contains("\"tailscale\": false"));
     }
 
     #[test]
-    fn test_cloud_init_contains_docker_installation() {
+    fn test_cloud_init_contains_devtools_config() {
         let (_temp_dir, key_path) = create_test_ssh_key();
 
         let config = AppConfig {
@@ -734,8 +615,12 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("Installing Docker"));
-        assert!(result.contains("get.docker.com"));
+        // Should contain devtools.json with default config
+        assert!(result.contains("devtools.json"));
+        assert!(result.contains("\"docker\": true"));
+        assert!(result.contains("\"shell_tools\": true"));
+        assert!(result.contains("\"nodejs\": true"));
+        assert!(result.contains("\"claude_code\": true"));
     }
 
     #[test]
@@ -768,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cloud_init_contains_node_and_claude_code() {
+    fn test_cloud_init_devtools_nodejs_and_claude() {
         let (_temp_dir, key_path) = create_test_ssh_key();
 
         let config = AppConfig {
@@ -777,9 +662,9 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config).unwrap();
-        assert!(result.contains("Installing Node.js"));
-        assert!(result.contains("nodesource.com"));
-        assert!(result.contains("@anthropic-ai/claude-code"));
+        // Node.js and Claude Code are now installed via agent, config in devtools.json
+        assert!(result.contains("\"nodejs\": true"));
+        assert!(result.contains("\"claude_code\": true"));
     }
 
     #[test]
