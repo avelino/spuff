@@ -56,6 +56,7 @@ A single CLI that provisions a cloud VM with your dev environment, connects you 
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **One-command setup** | ✅ | `spuff init` → `spuff up` → coding |
+| **Fast bootstrap** | ✅ | SSH-ready in ~30s, devtools install in background |
 | **Auto-destroy** | ✅ | Configurable idle timeout prevents forgotten instances |
 | **SSH Agent Forwarding** | ✅ | Use your local SSH keys to clone private repos |
 | **Snapshots** | ✅ | Save state before destroy, restore in seconds |
@@ -148,6 +149,10 @@ spuff agent processes       # Top processes by CPU
 spuff agent logs            # View cloud-init logs
 spuff agent logs -n 50      # Last 50 lines
 
+# Devtools management
+spuff agent devtools status   # Show devtools installation progress
+spuff agent devtools install  # Trigger devtools installation
+
 # Configuration
 spuff config show           # Display current config
 spuff config set region nyc3
@@ -198,18 +203,18 @@ tailscale_authkey: tskey-auth-xxx  # or use TS_AUTHKEY env var
 │  SSH Agent ─────┼────────►│  │      spuff-agent          │  │
 │  (keys)         │ forward │  │  • metrics & monitoring   │  │
 │                 │         │  │  • idle detection         │  │
-└─────────────────┘         │  │  • log access             │  │
+└─────────────────┘         │  │  • devtools installation  │  │
                             │  └────────────────────────────┘  │
                             │                                  │
-                            │  cloud-init: Docker, Git, deps   │
+                            │  cloud-init: essentials + agent  │
                             └──────────────────────────────────┘
 ```
 
 **Components:**
 
 - **spuff CLI** — Local tool for managing environments
-- **spuff-agent** — Daemon running on VM for monitoring and management
-- **cloud-init** — Bootstraps the VM with your environment
+- **spuff-agent** — Daemon running on VM for monitoring, devtools installation, and management
+- **cloud-init** — Fast bootstrap with essentials (~30s), devtools installed async via agent
 
 ## Roadmap
 
@@ -271,7 +276,8 @@ src/
 ├── agent/               # Remote agent (separate binary)
 │   ├── main.rs
 │   ├── routes.rs
-│   └── metrics.rs
+│   ├── metrics.rs
+│   └── devtools.rs      # Async devtools installation manager
 ├── state.rs             # Local SQLite state
 └── utils.rs             # Shared utilities
 ```
