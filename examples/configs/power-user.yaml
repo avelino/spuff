@@ -1,0 +1,37 @@
+# Power user configuration
+#
+# Full-featured setup with Tailscale, dotfiles,
+# and larger instance for demanding workloads.
+
+provider: digitalocean
+
+# Frankfurt region (good for Europe, decent for US East)
+region: fra1
+
+# 4 vCPUs, 8GB RAM - good for heavy builds, Claude Code, multiple services
+size: s-4vcpu-8gb
+
+# Longer timeout for extended work sessions
+idle_timeout: 4h
+
+environment: devbox
+ssh_key_path: ~/.ssh/id_ed25519
+ssh_user: dev
+
+# Your dotfiles repository
+# Supports both HTTPS and SSH URLs
+dotfiles: https://github.com/yourusername/dotfiles
+
+# Tailscale VPN for private networking
+# Get auth key from: https://login.tailscale.com/admin/settings/keys
+tailscale_enabled: true
+# tailscale_authkey: tskey-auth-xxxxxxxxxxxxx  # Or use TS_AUTHKEY env var
+
+# Custom agent token (optional, auto-generated if not set)
+# agent_token: your-secret-token-here
+
+# Tips:
+# - Use regions close to you for best latency
+# - Enable Tailscale for secure access from anywhere
+# - dotfiles with install.sh will be auto-executed
+# - Set TS_AUTHKEY as env var to avoid storing in config

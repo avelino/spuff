@@ -1,0 +1,51 @@
+# Machine Learning / GPU configuration (FUTURE)
+#
+# NOTE: GPU instances are not yet supported.
+# This file shows the planned configuration format.
+
+provider: digitalocean
+
+region: nyc1
+
+# GPU-enabled instance (planned)
+# size: gpu-h100-1x-80gb
+
+# Currently, use largest CPU instance
+size: s-8vcpu-16gb
+
+# Longer timeout for training jobs
+idle_timeout: 8h
+
+environment: devbox
+ssh_key_path: ~/.ssh/id_ed25519
+ssh_user: dev
+
+# Planned GPU-specific options:
+#
+# gpu_enabled: true
+# cuda_version: "12.2"
+# pytorch_version: "2.1"
+#
+# pre_installed:
+#   - pytorch
+#   - tensorflow
+#   - jupyter
+
+# Tips for ML workloads:
+#
+# 1. Use snapshots to save environment setup
+#    spuff snapshot create ml-base
+#    spuff up --snapshot ml-base
+#
+# 2. Mount persistent storage for datasets (planned)
+#    volumes:
+#      - name: datasets
+#        size: 500gb
+#        mount: /data
+#
+# 3. Port forwarding for Jupyter (planned)
+#    spuff forward 8888:8888
+#
+# 4. Consider spot instances for cost savings (planned)
+#    spot_instance: true
+#    spot_max_price: 0.50

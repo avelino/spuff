@@ -1,0 +1,12 @@
+# Minimal spuff configuration
+#
+# The bare minimum needed to run spuff.
+# Use this as a starting point and add options as needed.
+
+provider: digitalocean
+region: nyc1
+size: s-2vcpu-4gb
+idle_timeout: 2h
+environment: devbox
+ssh_key_path: ~/.ssh/id_ed25519
+ssh_user: dev

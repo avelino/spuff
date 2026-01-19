@@ -63,6 +63,7 @@ provider: digitalocean
 ```
 
 **Supported values:**
+
 | Provider | Status | Description |
 |----------|--------|-------------|
 | `digitalocean` | Stable | DigitalOcean Droplets |
@@ -84,6 +85,7 @@ region: nyc1
 ```
 
 **DigitalOcean regions:**
+
 | Region | Location |
 |--------|----------|
 | `nyc1`, `nyc3` | New York, USA |
@@ -99,6 +101,7 @@ region: nyc1
 **Tip:** Choose the region closest to you for best performance.
 
 **Override at runtime:**
+
 ```bash
 spuff up --region fra1
 ```
@@ -118,6 +121,7 @@ size: s-2vcpu-4gb
 ```
 
 **DigitalOcean sizes:**
+
 | Size | vCPUs | Memory | Disk | Price/hour |
 |------|-------|--------|------|------------|
 | `s-1vcpu-1gb` | 1 | 1 GB | 25 GB | $0.009 |
@@ -128,11 +132,13 @@ size: s-2vcpu-4gb
 | `s-8vcpu-16gb` | 8 | 16 GB | 320 GB | $0.143 |
 
 **Recommended:**
+
 - Light development: `s-2vcpu-4gb` (default)
 - Heavy builds/Claude Code: `s-4vcpu-8gb`
 - CI/testing: `s-1vcpu-2gb`
 
 **Override at runtime:**
+
 ```bash
 spuff up --size s-4vcpu-8gb
 ```
@@ -152,6 +158,7 @@ idle_timeout: 2h
 ```
 
 **Duration formats:**
+
 | Format | Example | Description |
 |--------|---------|-------------|
 | `Nh` | `2h` | N hours |
@@ -160,6 +167,7 @@ idle_timeout: 2h
 | `N` | `7200` | N seconds (raw) |
 
 **Examples:**
+
 ```yaml
 idle_timeout: 30m    # 30 minutes
 idle_timeout: 2h     # 2 hours (recommended)
@@ -168,6 +176,7 @@ idle_timeout: 24h    # 24 hours (use with caution)
 ```
 
 **How it works:**
+
 1. The `spuff-agent` running on the VM monitors activity
 2. Activity includes: SSH sessions, CPU usage, network traffic
 3. When no activity for the configured duration, the VM self-destructs
@@ -188,6 +197,7 @@ environment: devbox
 ```
 
 **Supported values:**
+
 | Environment | Description |
 |-------------|-------------|
 | `devbox` | Modern shell (zsh), Docker, Git, development tools |
@@ -203,6 +213,7 @@ environment: devbox
 **Default:** `~/.ssh/id_ed25519`
 
 Path to your SSH private key file. This key is used to:
+
 1. Authenticate with the cloud provider (public key registered)
 2. Connect to the VM via SSH
 3. Forward your SSH agent for git operations
@@ -212,16 +223,19 @@ ssh_key_path: ~/.ssh/id_ed25519
 ```
 
 **Supported key types:**
+
 - `id_ed25519` (recommended)
 - `id_rsa`
 - `id_ecdsa`
 
 **Notes:**
+
 - The path supports `~` expansion
 - The corresponding `.pub` file must exist
 - The public key is registered with your cloud provider
 
 **Examples:**
+
 ```yaml
 ssh_key_path: ~/.ssh/id_ed25519           # Default
 ssh_key_path: ~/.ssh/spuff_key            # Custom key
@@ -243,6 +257,7 @@ ssh_user: dev
 ```
 
 **Notes:**
+
 - Default is `dev` (non-root for security)
 - User is created with `sudo` and `docker` groups
 - Root SSH login is disabled by default
@@ -263,6 +278,7 @@ dotfiles: https://github.com/yourusername/dotfiles
 ```
 
 **Supported formats:**
+
 ```yaml
 # HTTPS (recommended for public repos)
 dotfiles: https://github.com/user/dotfiles
@@ -272,6 +288,7 @@ dotfiles: git@github.com:user/dotfiles.git
 ```
 
 **How it works:**
+
 1. Repository is cloned to `~/dotfiles`
 2. If `install.sh` exists, it's executed
 3. If `Makefile` exists with `install` target, `make install` is run
@@ -294,6 +311,7 @@ tailscale_enabled: true
 ```
 
 **Benefits:**
+
 - Access VM via private Tailscale IP (no public exposure)
 - Persistent hostname across VM recreations
 - Secure mesh networking
@@ -314,6 +332,7 @@ tailscale_authkey: tskey-auth-xxxxxxxxxxxxx
 ```
 
 **Getting an auth key:**
+
 1. Go to [Tailscale Admin Console](https://login.tailscale.com/admin/settings/keys)
 2. Click "Generate auth key"
 3. Settings:
@@ -323,6 +342,7 @@ tailscale_authkey: tskey-auth-xxxxxxxxxxxxx
 4. Copy the key (starts with `tskey-auth-`)
 
 **Alternative:** Use environment variable
+
 ```bash
 export TS_AUTHKEY="tskey-auth-xxxxxxxxxxxxx"
 ```
@@ -342,11 +362,13 @@ agent_token: your-secret-token-here
 ```
 
 **How it works:**
+
 1. If set, all agent API requests require `X-Spuff-Token` header
 2. The CLI automatically includes this token in requests
 3. If not set, a random token is generated during VM creation
 
 **Alternative:** Use environment variable
+
 ```bash
 export SPUFF_AGENT_TOKEN="your-secret-token"
 ```
@@ -371,6 +393,7 @@ API tokens and secrets can be provided via environment variables instead of (or 
 **Priority:** Environment variables take precedence over config file values.
 
 **Example setup:**
+
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
 export DIGITALOCEAN_TOKEN="dop_v1_xxxxxxxxxxxxxxxx"
@@ -388,6 +411,7 @@ spuff config show
 ```
 
 Output:
+
 ```
 Current Configuration
 
@@ -414,6 +438,7 @@ spuff config set tailscale true
 ```
 
 **Available keys:**
+
 - `provider`
 - `region`
 - `size`
@@ -533,6 +558,7 @@ Error: API token not configured
 ```
 
 **Solution:** Either:
+
 1. Add `api_token` to config.yaml (not recommended)
 2. Set environment variable: `export DIGITALOCEAN_TOKEN="..."`
 3. Set generic variable: `export SPUFF_API_TOKEN="..."`
@@ -544,5 +570,6 @@ Error: SSH key not found at ~/.ssh/id_ed25519
 ```
 
 **Solution:**
+
 1. Generate a key: `ssh-keygen -t ed25519`
 2. Or update `ssh_key_path` to point to existing key

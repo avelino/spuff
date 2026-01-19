@@ -1,0 +1,46 @@
+# CI/CD pipeline configuration
+#
+# Optimized for automated testing and build pipelines.
+# Smaller instances, shorter timeouts, minimal setup.
+
+provider: digitalocean
+
+# Choose region based on your CI location
+region: nyc1
+
+# Smaller instance for most CI tasks
+# Upgrade if builds are slow
+size: s-1vcpu-2gb
+
+# Short timeout - CI jobs should complete quickly
+# Prevents runaway costs from stuck pipelines
+idle_timeout: 30m
+
+environment: devbox
+
+# Use a dedicated CI SSH key
+ssh_key_path: ~/.ssh/ci_key
+ssh_user: ci
+
+# Tips for CI/CD usage:
+#
+# 1. Environment variables in CI:
+#    - DIGITALOCEAN_TOKEN: API token
+#    - SSH key should be base64-encoded in CI secrets
+#
+# 2. GitHub Actions example:
+#    - name: Setup spuff
+#      run: |
+#        echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/ci_key
+#        chmod 600 ~/.ssh/ci_key
+#        spuff up --no-connect
+#
+# 3. Always cleanup:
+#    - name: Cleanup
+#      if: always()
+#      run: spuff down --force
+#
+# 4. Use --no-connect flag for non-interactive usage
+#
+# 5. Consider caching snapshots for faster startup:
+#    spuff up --snapshot ci-base-image

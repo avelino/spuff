@@ -1,0 +1,51 @@
+# Custom cloud-init packages example
+#
+# This shows how cloud-init package installation works.
+# spuff generates cloud-init automatically, but this demonstrates
+# the format if you need to understand or extend it.
+#
+# NOTE: This is for reference only. spuff manages cloud-init internally.
+
+#cloud-config
+
+# Update package lists
+package_update: true
+
+# Don't upgrade all packages (faster boot)
+package_upgrade: false
+
+# Install additional packages
+packages:
+  # Development tools
+  - build-essential
+  - git
+  - curl
+  - wget
+  - vim
+  - htop
+  - tmux
+
+  # Languages (optional, devbox handles these better)
+  # - python3
+  # - python3-pip
+  # - nodejs
+  # - npm
+
+  # Database clients
+  - postgresql-client
+  - redis-tools
+
+  # Networking tools
+  - net-tools
+  - dnsutils
+  - traceroute
+
+  # Archive tools
+  - unzip
+  - p7zip-full
+
+# Snap packages (optional)
+# snap:
+#   commands:
+#     - snap install code --classic
+#     - snap install kubectl --classic

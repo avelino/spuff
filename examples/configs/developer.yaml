@@ -1,0 +1,21 @@
+# Standard developer configuration
+#
+# A comfortable setup for daily development work.
+# Includes dotfiles and reasonable resource allocation.
+
+provider: digitalocean
+region: nyc1
+size: s-2vcpu-4gb
+idle_timeout: 2h
+environment: devbox
+ssh_key_path: ~/.ssh/id_ed25519
+ssh_user: dev
+
+# Optional: Your dotfiles repository
+# Will be cloned to ~/dotfiles on VM creation
+# dotfiles: https://github.com/yourusername/dotfiles
+
+# Tips:
+# - Set DIGITALOCEAN_TOKEN environment variable
+# - Run 'ssh-add ~/.ssh/id_ed25519' before 'spuff up'
+# - Use 'spuff up --size s-4vcpu-8gb' for heavier workloads
