@@ -2,6 +2,7 @@ use tera::{Context, Tera};
 
 use crate::config::AppConfig;
 use crate::error::Result;
+use crate::project_config::ProjectConfig;
 
 const CLOUD_INIT_TEMPLATE: &str = r#"#cloud-config
 package_update: true
@@ -51,6 +52,14 @@ write_files:
         "tailscale": {% if tailscale_enabled %}true{% else %}false{% endif %},
         "tailscale_authkey": {% if tailscale_authkey %}"{{ tailscale_authkey }}"{% else %}null{% endif %}
       }
+
+{% if has_project_config %}
+  # Project configuration from spuff.yaml
+  - path: /opt/spuff/project.json
+    permissions: '0644'
+    content: |
+      {{ project_config }}
+{% endif %}
 
   # Bootstrap script - minimal setup + agent start
   - path: /opt/spuff/bootstrap.sh
@@ -411,7 +420,7 @@ runcmd:
 final_message: "spuff cloud-init done in $UPTIME seconds - bootstrap running async"
 "#;
 
-pub fn generate_cloud_init(config: &AppConfig) -> Result<String> {
+pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectConfig>) -> Result<String> {
     let mut tera = Tera::default();
     tera.add_raw_template("cloud-init", CLOUD_INIT_TEMPLATE)?;
 
@@ -425,6 +434,12 @@ pub fn generate_cloud_init(config: &AppConfig) -> Result<String> {
         format!("/home/{}", config.ssh_user)
     };
 
+    // Serialize project config to JSON if present
+    let project_config_json = project_config
+        .map(|pc| serde_json::to_string_pretty(pc))
+        .transpose()
+        .map_err(|e| crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e)))?;
+
     let mut context = Context::new();
     context.insert("username", &config.ssh_user);
     context.insert("home_dir", &home_dir);
@@ -435,6 +450,8 @@ pub fn generate_cloud_init(config: &AppConfig) -> Result<String> {
     context.insert("tailscale_enabled", &config.tailscale_enabled);
     context.insert("tailscale_authkey", &config.tailscale_authkey);
     context.insert("agent_token", &config.agent_token);
+    context.insert("project_config", &project_config_json);
+    context.insert("has_project_config", &project_config.is_some());
 
     let rendered = tera.render("cloud-init", &context)?;
     Ok(rendered)
@@ -476,7 +493,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         assert!(result.contains("name: devuser"));
     }
 
@@ -489,7 +506,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         assert!(result.contains("ssh-ed25519"));
         assert!(result.contains("test@example.com"));
     }
@@ -504,7 +521,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // 4h = 14400 seconds
         assert!(result.contains("IDLE_TIMEOUT_SECONDS=14400"));
     }
@@ -519,7 +536,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Environment is now stored in devtools.json for agent to install
         assert!(result.contains("devtools.json"));
         assert!(result.contains("\"environment\": \"devbox\""));
@@ -535,7 +552,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Environment is now stored in devtools.json for agent to install
         assert!(result.contains("devtools.json"));
         assert!(result.contains("\"environment\": \"nix\""));
@@ -551,7 +568,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Dotfiles URL is now stored in devtools.json for agent to install
         assert!(result.contains("devtools.json"));
         assert!(result.contains("\"dotfiles\": \"https://github.com/user/dotfiles\""));
@@ -567,7 +584,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // When no dotfiles, devtools.json should have null
         assert!(result.contains("\"dotfiles\": null"));
     }
@@ -583,7 +600,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Tailscale config is now stored in devtools.json for agent to install
         assert!(result.contains("devtools.json"));
         assert!(result.contains("\"tailscale\": true"));
@@ -600,7 +617,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Tailscale disabled in devtools.json
         assert!(result.contains("\"tailscale\": false"));
     }
@@ -614,7 +631,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Should contain devtools.json with default config
         assert!(result.contains("devtools.json"));
         assert!(result.contains("\"docker\": true"));
@@ -632,7 +649,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         assert!(result.contains("spuff-agent"));
         assert!(result.contains("spuff-agent.service"));
     }
@@ -646,7 +663,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         assert!(result.contains("idle-checker.sh"));
         assert!(result.contains("spuff-idle-checker"));
         assert!(result.contains("check_idle"));
@@ -661,7 +678,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Node.js and Claude Code are now installed via agent, config in devtools.json
         assert!(result.contains("\"nodejs\": true"));
         assert!(result.contains("\"claude_code\": true"));
@@ -702,7 +719,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
 
         // Should start with #cloud-config
         assert!(result.starts_with("#cloud-config"));
@@ -722,7 +739,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         assert!(result.contains("agent.env"));
         assert!(result.contains("SPUFF_AGENT_TOKEN=secret-agent-token-123"));
         assert!(result.contains("permissions: '0600'"));
@@ -738,7 +755,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
         // Should not contain agent.env when no token is set
         assert!(!result.contains("SPUFF_AGENT_TOKEN="));
     }
@@ -752,7 +769,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
 
         // Should contain known_hosts for major git servers
         assert!(result.contains("/etc/ssh/ssh_known_hosts"));
@@ -772,7 +789,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = generate_cloud_init(&config).unwrap();
+        let result = generate_cloud_init(&config, None).unwrap();
 
         // Should contain async bootstrap service
         assert!(result.contains("spuff-bootstrap.service"));

@@ -68,6 +68,48 @@ pub enum Commands {
         detailed: bool,
     },
 
+    /// View project setup logs from the remote environment
+    Logs {
+        /// Show logs for a specific bundle (e.g., rust, go, python)
+        #[arg(long)]
+        bundle: Option<String>,
+
+        /// Show package installation logs
+        #[arg(long)]
+        packages: bool,
+
+        /// Show repository cloning logs
+        #[arg(long)]
+        repos: bool,
+
+        /// Show docker services logs
+        #[arg(long)]
+        services: bool,
+
+        /// Show logs for a specific setup script (by index, starting at 1)
+        #[arg(long)]
+        script: Option<usize>,
+
+        /// Follow mode: continuously watch for new logs (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Number of lines to show (default: 100)
+        #[arg(short = 'n', long, default_value = "100")]
+        lines: usize,
+    },
+
+    /// Create SSH tunnels to the remote environment (for ports in spuff.yaml)
+    Tunnel {
+        /// Specific port to tunnel (default: all ports from spuff.yaml)
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Stop running tunnels
+        #[arg(long)]
+        stop: bool,
+    },
+
     /// Manage snapshots
     Snapshot {
         #[command(subcommand)]
@@ -195,6 +237,22 @@ impl Cli {
             Commands::Status { detailed } => {
                 let config = AppConfig::load()?;
                 commands::status::execute(&config, detailed).await
+            }
+            Commands::Logs {
+                bundle,
+                packages,
+                repos,
+                services,
+                script,
+                follow,
+                lines,
+            } => {
+                let config = AppConfig::load()?;
+                commands::logs::execute(&config, bundle, packages, repos, services, script, follow, lines).await
+            }
+            Commands::Tunnel { port, stop } => {
+                let config = AppConfig::load()?;
+                commands::ssh::tunnel(&config, port, stop).await
             }
             Commands::Snapshot { command } => {
                 let config = AppConfig::load()?;
