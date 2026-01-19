@@ -78,10 +78,15 @@ The main binary that users interact with. Built with:
 Key modules:
 
 - `src/cli/commands/` - Command implementations (up, down, ssh, status, etc.)
-- `src/provider/` - Cloud provider abstractions and implementations
+- `src/provider/` - Cloud provider abstraction layer:
+  - `mod.rs` - Provider trait and common types (`ProviderInstance`, `InstanceStatus`, `Snapshot`)
+  - `config.rs` - Provider-agnostic configuration (`InstanceRequest`, `ImageSpec`, `ProviderTimeouts`, `ProviderType`)
+  - `error.rs` - Structured error types (`ProviderError`, `ProviderResult`)
+  - `registry.rs` - Provider factory registry (`ProviderFactory`, `ProviderRegistry`)
+  - `digitalocean.rs` - DigitalOcean implementation
 - `src/connector/ssh.rs` - SSH/SCP operations
 - `src/environment/cloud_init.rs` - Cloud-init template generation
-- `src/state.rs` - SQLite state management
+- `src/state.rs` - SQLite state management (`LocalInstance`, `StateDb`)
 - `src/tui/` - Terminal UI components
 
 ### Agent (`spuff-agent`)
@@ -191,37 +196,39 @@ async fn provision_instance(config: &AppConfig, ...) -> Result<()> {
     // 1. Generate cloud-init YAML from template
     let user_data = generate_cloud_init(config)?;  // Base64-encoded YAML
 
-    // 2. Call provider API to create instance
-    let instance = provider.create_instance(&InstanceConfig {
-        name: generate_instance_name(),  // "spuff-<uuid>"
-        region: config.region,
-        size: config.size,
-        image: "ubuntu-24-04-x64",
-        user_data: Some(user_data),
-        ssh_keys: ssh_key_ids,  // fetched from provider account
-        tags: vec!["spuff"],
-    }).await?;
+    // 2. Build provider-agnostic instance request
+    let request = InstanceRequest::new(instance_name, config.region, config.size)
+        .with_image(ImageSpec::ubuntu("24.04"))  // Provider-agnostic image spec
+        .with_user_data(user_data)
+        .with_label("spuff", "true")
+        .with_label("managed-by", "spuff-cli");
 
-    // 3. Poll until instance has public IP
+    // 3. Call provider API to create instance (returns ProviderInstance)
+    let instance = provider.create_instance(&request).await?;
+
+    // 4. Poll until instance has public IP
     let instance = provider.wait_ready(&instance.id).await?;
 
-    // 4. Save to local state
-    db.save_instance(&Instance { id, name, ip, ... })?;
+    // 5. Convert ProviderInstance to LocalInstance and save to state
+    let local_instance = LocalInstance::from_provider(
+        &instance, instance_name, config.provider, region, size
+    );
+    db.save_instance(&local_instance)?;
 
-    // 5. Wait for SSH port
+    // 6. Wait for SSH port
     wait_for_ssh(&instance.ip, 22, timeout).await?;
 
-    // 6. Wait for user to exist (cloud-init creates it)
+    // 7. Wait for user to exist (cloud-init creates it)
     wait_for_ssh_login(&instance.ip, config, timeout).await?;
 
-    // 7. [dev mode] Upload local agent binary
+    // 8. [dev mode] Upload local agent binary
     scp_upload(&instance.ip, config, "target/release/spuff-agent", "/tmp/spuff-agent").await?;
     run_command(&instance.ip, config, "sudo mv /tmp/spuff-agent /opt/spuff/").await?;
 
-    // 8. Monitor cloud-init progress via SSH
+    // 9. Monitor cloud-init progress via SSH
     wait_for_cloud_init_with_progress(&instance.ip, config, &tx).await?;
 
-    // 9. Start interactive SSH session
+    // 10. Start interactive SSH session
     connect(&instance.ip, config).await?;
 }
 ```
@@ -648,8 +655,36 @@ CREATE TABLE IF NOT EXISTS instances (
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
     size TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    active INTEGER DEFAULT 1
 );
+```
+
+### Types
+
+**LocalInstance** - Instance information stored locally (different from `ProviderInstance` which represents the provider's view):
+
+```rust
+pub struct LocalInstance {
+    pub id: String,        // Provider-specific instance ID
+    pub name: String,      // Human-readable instance name
+    pub ip: String,        // Public IP address (as string for storage)
+    pub provider: String,  // Which cloud provider manages this instance
+    pub region: String,    // Region/datacenter where the instance runs
+    pub size: String,      // Instance size/type
+    pub created_at: DateTime<Utc>,
+}
+
+impl LocalInstance {
+    // Create from a ProviderInstance (returned by provider API)
+    pub fn from_provider(
+        provider_instance: &ProviderInstance,
+        name: String,
+        provider: String,
+        region: String,
+        size: String,
+    ) -> Self;
+}
 ```
 
 ### Operations
@@ -658,10 +693,11 @@ CREATE TABLE IF NOT EXISTS instances (
 impl StateDb {
     pub fn open() -> Result<Self>;
 
-    pub fn save_instance(&self, instance: &Instance) -> Result<()>;
-    pub fn get_active_instance(&self) -> Result<Option<Instance>>;
-    pub fn delete_instance(&self, id: &str) -> Result<()>;
-    pub fn list_instances(&self) -> Result<Vec<Instance>>;
+    pub fn save_instance(&self, instance: &LocalInstance) -> Result<()>;
+    pub fn get_active_instance(&self) -> Result<Option<LocalInstance>>;
+    pub fn remove_instance(&self, id: &str) -> Result<()>;
+    pub fn list_instances(&self) -> Result<Vec<LocalInstance>>;
+    pub fn update_instance_ip(&self, id: &str, ip: &str) -> Result<()>;
 }
 ```
 
@@ -747,6 +783,48 @@ From cloud-init:
 
 ## Error Handling
 
+### Structured Provider Errors
+
+Provider operations use structured `ProviderError` types for proper error handling and recovery strategies:
+
+```rust
+pub enum ProviderError {
+    // Authentication issues - token invalid, expired, etc.
+    Authentication { provider: String, message: String },
+
+    // Rate limiting - includes optional retry-after duration
+    RateLimit { retry_after: Option<Duration> },
+
+    // Resource not found - instance, snapshot, etc.
+    NotFound { resource_type: String, id: String },
+
+    // Quota exceeded - droplet limit, snapshot limit, etc.
+    QuotaExceeded { resource: String, message: String },
+
+    // Operation timeout with elapsed time
+    Timeout { operation: String, elapsed: Duration },
+
+    // Generic API error with HTTP status
+    Api { status: u16, message: String },
+}
+
+// Check if error is retryable
+impl ProviderError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RateLimit { .. } | Self::Timeout { .. } | Self::Network(_))
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimit { retry_after } => *retry_after,
+            Self::Timeout { .. } => Some(Duration::from_secs(5)),
+            Self::Network(_) => Some(Duration::from_secs(2)),
+            _ => None,
+        }
+    }
+}
+```
+
 ### SSH Errors
 
 The system provides clear error messages for common SSH issues:
@@ -762,16 +840,27 @@ if stderr.contains("Permission denied") || stderr.contains("passphrase") {
 
 ### Provider API Errors
 
-All provider API calls check HTTP status codes and parse error responses:
+Provider API calls use structured errors that can be matched for specific handling:
 
 ```rust
-if !response.status().is_success() {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    return Err(SpuffError::Provider(format!(
-        "Failed to create droplet: {} - {}",
-        status, body
-    )));
+match provider.create_instance(&request).await {
+    Ok(instance) => { /* success */ },
+    Err(ProviderError::Authentication { .. }) => {
+        // Invalid token - prompt user to check credentials
+    },
+    Err(ProviderError::QuotaExceeded { resource, .. }) => {
+        // Quota reached - suggest cleanup or upgrade
+    },
+    Err(ProviderError::RateLimit { retry_after }) => {
+        // Rate limited - wait and retry
+        if let Some(duration) = retry_after {
+            tokio::time::sleep(duration).await;
+        }
+    },
+    Err(e) => {
+        // Other errors - propagate
+        return Err(e.into());
+    }
 }
 ```
 
@@ -793,32 +882,162 @@ Operations have configurable timeouts:
 
 ### Adding a New Provider
 
-1. Create `src/provider/<name>.rs`
-2. Implement the `Provider` trait:
+Spuff uses a **Registry Pattern** for providers, making it easy to add new cloud providers without modifying existing code.
+
+#### Step 1: Create Provider Module
+
+Create `src/provider/<name>.rs` (e.g., `src/provider/hetzner.rs`).
+
+#### Step 2: Implement the Provider Trait
 
 ```rust
+use async_trait::async_trait;
+use crate::provider::{
+    ImageSpec, InstanceRequest, Provider, ProviderInstance,
+    ProviderResult, ProviderTimeouts, Snapshot,
+};
+
+pub struct HetznerProvider {
+    client: reqwest::Client,
+    token: String,
+    timeouts: ProviderTimeouts,
+}
+
 #[async_trait]
-pub trait Provider: Send + Sync {
-    async fn create_instance(&self, config: &InstanceConfig) -> Result<Instance>;
-    async fn destroy_instance(&self, id: &str) -> Result<()>;
-    async fn get_instance(&self, id: &str) -> Result<Option<Instance>>;
-    async fn list_instances(&self) -> Result<Vec<Instance>>;
-    async fn wait_ready(&self, id: &str) -> Result<Instance>;
-    async fn create_snapshot(&self, instance_id: &str, name: &str) -> Result<Snapshot>;
-    async fn list_snapshots(&self) -> Result<Vec<Snapshot>>;
-    async fn delete_snapshot(&self, id: &str) -> Result<()>;
+impl Provider for HetznerProvider {
+    fn name(&self) -> &'static str {
+        "hetzner"
+    }
+
+    async fn create_instance(&self, request: &InstanceRequest) -> ProviderResult<ProviderInstance> {
+        // Convert ImageSpec to Hetzner image ID
+        let image = self.resolve_image(&request.image)?;
+        // Call Hetzner API...
+    }
+
+    async fn destroy_instance(&self, id: &str) -> ProviderResult<()> { ... }
+    async fn get_instance(&self, id: &str) -> ProviderResult<Option<ProviderInstance>> { ... }
+    async fn list_instances(&self) -> ProviderResult<Vec<ProviderInstance>> { ... }
+    async fn wait_ready(&self, id: &str) -> ProviderResult<ProviderInstance> { ... }
+    async fn create_snapshot(&self, instance_id: &str, name: &str) -> ProviderResult<Snapshot> { ... }
+    async fn list_snapshots(&self) -> ProviderResult<Vec<Snapshot>> { ... }
+    async fn delete_snapshot(&self, id: &str) -> ProviderResult<()> { ... }
 }
 ```
 
-1. Add to `src/provider/mod.rs`:
+#### Step 3: Implement the ProviderFactory Trait
 
 ```rust
-pub fn create_provider(config: &AppConfig) -> Result<Box<dyn Provider>> {
-    match config.provider.as_str() {
-        "digitalocean" => Ok(Box::new(DigitalOceanProvider::new(&config.api_token)?)),
-        "hetzner" => Ok(Box::new(HetznerProvider::new(&config.api_token)?)),
-        _ => Err(SpuffError::Provider("Unknown provider")),
+use crate::provider::{
+    ProviderFactory, ProviderResult, ProviderTimeouts, ProviderType,
+};
+
+pub struct HetznerFactory;
+
+impl ProviderFactory for HetznerFactory {
+    fn provider_type(&self) -> ProviderType {
+        ProviderType::Hetzner
     }
+
+    fn create(&self, token: &str, timeouts: ProviderTimeouts) -> ProviderResult<Box<dyn Provider>> {
+        if token.is_empty() {
+            return Err(ProviderError::auth("hetzner", "API token is required"));
+        }
+        Ok(Box::new(HetznerProvider::new(token, timeouts)?))
+    }
+}
+```
+
+#### Step 4: Register the Provider
+
+In `src/provider/registry.rs`, add your factory to the default registration:
+
+```rust
+pub fn register_defaults(&mut self) {
+    use super::digitalocean::DigitalOceanFactory;
+    use super::hetzner::HetznerFactory;  // Add this
+
+    self.register(DigitalOceanFactory);
+    self.register(HetznerFactory);  // Add this
+}
+```
+
+#### Step 5: Add Provider Type
+
+In `src/provider/config.rs`, add your provider to the enum:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderType {
+    DigitalOcean,
+    Hetzner,  // Add this
+    Aws,
+    // ...
+}
+
+impl ProviderType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "digitalocean" | "do" => Some(Self::DigitalOcean),
+            "hetzner" => Some(Self::Hetzner),  // Add this
+            // ...
+        }
+    }
+
+    pub fn is_implemented(&self) -> bool {
+        matches!(self, Self::DigitalOcean | Self::Hetzner)  // Add here
+    }
+}
+```
+
+### Key Types for Provider Implementation
+
+**InstanceRequest** - Provider-agnostic instance configuration:
+
+```rust
+pub struct InstanceRequest {
+    pub name: String,
+    pub region: String,
+    pub size: String,
+    pub image: ImageSpec,
+    pub user_data: Option<String>,
+    pub labels: HashMap<String, String>,
+}
+```
+
+**ImageSpec** - Provider-agnostic image specification:
+
+```rust
+pub enum ImageSpec {
+    Ubuntu(String),    // e.g., "24.04"
+    Debian(String),    // e.g., "12"
+    Custom(String),    // Provider-specific image ID
+    Snapshot(String),  // Snapshot ID
+}
+```
+
+**ProviderInstance** - Instance returned by provider operations:
+
+```rust
+pub struct ProviderInstance {
+    pub id: String,
+    pub ip: IpAddr,
+    pub status: InstanceStatus,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+**ProviderError** - Structured error types for proper handling:
+
+```rust
+pub enum ProviderError {
+    Authentication { provider: String, message: String },
+    RateLimit { retry_after: Option<Duration> },
+    NotFound { resource_type: String, id: String },
+    QuotaExceeded { resource: String, message: String },
+    Timeout { operation: String, elapsed: Duration },
+    Api { status: u16, message: String },
+    // ...
 }
 ```
 

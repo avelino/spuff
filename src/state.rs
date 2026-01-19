@@ -1,3 +1,8 @@
+//! Local state management for tracking active instances.
+//!
+//! This module provides SQLite-backed persistence for tracking which instances
+//! are currently active. This allows the CLI to maintain state across invocations.
+
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -6,23 +11,88 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AppConfig;
 use crate::error::Result;
+use crate::provider::ProviderInstance;
 
+/// Instance information stored locally.
+///
+/// This is separate from `ProviderInstance` which represents the provider's view.
+/// `LocalInstance` contains additional metadata needed for CLI operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Instance {
+pub struct LocalInstance {
+    /// Provider-specific instance ID
     pub id: String,
+
+    /// Human-readable instance name
     pub name: String,
+
+    /// Public IP address (as string for storage)
     pub ip: String,
+
+    /// Which cloud provider manages this instance
     pub provider: String,
+
+    /// Region/datacenter where the instance runs
     pub region: String,
+
+    /// Instance size/type
     pub size: String,
+
+    /// When the instance was created
     pub created_at: DateTime<Utc>,
 }
 
+/// Legacy type alias for backward compatibility.
+#[deprecated(since = "0.2.0", note = "Use LocalInstance instead")]
+pub type Instance = LocalInstance;
+
+impl LocalInstance {
+    /// Create a LocalInstance from a ProviderInstance and additional metadata.
+    pub fn from_provider(
+        provider_instance: &ProviderInstance,
+        name: String,
+        provider: String,
+        region: String,
+        size: String,
+    ) -> Self {
+        Self {
+            id: provider_instance.id.clone(),
+            name,
+            ip: provider_instance.ip.to_string(),
+            provider,
+            region,
+            size,
+            created_at: provider_instance.created_at,
+        }
+    }
+
+    /// Create a new LocalInstance with the current timestamp.
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        ip: impl Into<String>,
+        provider: impl Into<String>,
+        region: impl Into<String>,
+        size: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            ip: ip.into(),
+            provider: provider.into(),
+            region: region.into(),
+            size: size.into(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// SQLite-backed state database.
 pub struct StateDb {
     conn: Connection,
 }
 
 impl StateDb {
+    /// Open or create the state database.
     pub fn open() -> Result<Self> {
         let path = Self::db_path()?;
 
@@ -53,9 +123,12 @@ impl StateDb {
         Ok(AppConfig::config_dir()?.join("state.db"))
     }
 
-    pub fn save_instance(&self, instance: &Instance) -> Result<()> {
+    /// Save an instance, marking it as the only active one.
+    pub fn save_instance(&self, instance: &LocalInstance) -> Result<()> {
+        // First, mark all existing instances as inactive
         self.conn.execute("UPDATE instances SET active = 0", [])?;
 
+        // Insert or replace the new instance as active
         self.conn.execute(
             "INSERT OR REPLACE INTO instances (id, name, ip, provider, region, size, created_at, active)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
@@ -73,7 +146,8 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn get_active_instance(&self) -> Result<Option<Instance>> {
+    /// Get the currently active instance, if any.
+    pub fn get_active_instance(&self) -> Result<Option<LocalInstance>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, ip, provider, region, size, created_at
              FROM instances
@@ -88,7 +162,7 @@ impl StateDb {
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                 .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
 
-            Ok(Some(Instance {
+            Ok(Some(LocalInstance {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 ip: row.get(2)?,
@@ -102,14 +176,16 @@ impl StateDb {
         }
     }
 
+    /// Remove an instance from the database.
     pub fn remove_instance(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM instances WHERE id = ?1", params![id])?;
         Ok(())
     }
 
+    /// List all instances (including inactive ones).
     #[allow(dead_code)]
-    pub fn list_instances(&self) -> Result<Vec<Instance>> {
+    pub fn list_instances(&self) -> Result<Vec<LocalInstance>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, ip, provider, region, size, created_at FROM instances ORDER BY created_at DESC",
         )?;
@@ -120,7 +196,7 @@ impl StateDb {
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                     .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
 
-                Ok(Instance {
+                Ok(LocalInstance {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     ip: row.get(2)?,
@@ -135,6 +211,7 @@ impl StateDb {
         Ok(instances)
     }
 
+    /// Update the IP address of an instance.
     #[allow(dead_code)]
     pub fn update_instance_ip(&self, id: &str, ip: &str) -> Result<()> {
         self.conn
@@ -167,8 +244,8 @@ mod tests {
         StateDb { conn }
     }
 
-    fn create_test_instance(id: &str, name: &str) -> Instance {
-        Instance {
+    fn create_test_instance(id: &str, name: &str) -> LocalInstance {
+        LocalInstance {
             id: id.to_string(),
             name: name.to_string(),
             ip: "10.0.0.1".to_string(),
@@ -268,7 +345,7 @@ mod tests {
     fn test_instance_replace_on_same_id() {
         let db = create_test_db();
 
-        let instance1 = Instance {
+        let instance1 = LocalInstance {
             id: "same-id".to_string(),
             name: "first-name".to_string(),
             ip: "1.1.1.1".to_string(),
@@ -278,7 +355,7 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let instance2 = Instance {
+        let instance2 = LocalInstance {
             id: "same-id".to_string(),
             name: "second-name".to_string(),
             ip: "2.2.2.2".to_string(),
@@ -306,8 +383,17 @@ mod tests {
         assert!(json.contains("spuff-serial"));
         assert!(json.contains("digitalocean"));
 
-        let deserialized: Instance = serde_json::from_str(&json).unwrap();
+        let deserialized: LocalInstance = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, instance.id);
         assert_eq!(deserialized.name, instance.name);
+    }
+
+    #[test]
+    fn test_local_instance_new() {
+        let instance = LocalInstance::new("id-123", "test-name", "1.2.3.4", "do", "nyc1", "small");
+        assert_eq!(instance.id, "id-123");
+        assert_eq!(instance.name, "test-name");
+        assert_eq!(instance.ip, "1.2.3.4");
+        assert_eq!(instance.provider, "do");
     }
 }

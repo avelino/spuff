@@ -376,12 +376,35 @@ fn format_percent_colored(percent: f32) -> console::StyledObject<String> {
     }
 }
 
-/// Extract JSON from output that may contain banner text before/after
+/// Extract JSON from output that may contain banner text before/after.
+///
+/// Priority: JSON objects first (more common API responses), then arrays.
 fn extract_json(output: &str) -> &str {
-    let bytes = output.as_bytes();
+    // First, look for '{' - JSON object (most API responses are objects)
+    if let Some(brace_pos) = output.find('{') {
+        // Find the matching '}' by counting braces
+        let mut depth = 0;
+        let mut end_pos = None;
+        for (i, c) in output[brace_pos..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = Some(brace_pos + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(end) = end_pos {
+            return &output[brace_pos..=end];
+        }
+    }
 
-    // First, look for array patterns '[{' or '["' (most likely JSON arrays)
-    // Skip ANSI escape sequences which look like ESC[ (0x1b 0x5b)
+    // Then look for array patterns '[{' or '["' (for endpoints returning arrays)
+    let bytes = output.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'[' && i + 1 < bytes.len() {
             // Skip if this is an ANSI escape sequence (preceded by ESC 0x1b)
@@ -391,24 +414,26 @@ fn extract_json(output: &str) -> &str {
 
             let next = bytes[i + 1];
             // Check if it looks like JSON array: '[{' or '["'
-            // Don't match '[digit' as it could be ANSI codes like [33m
             if next == b'{' || next == b'"' {
-                // Find matching ']'
-                if let Some(end_pos) = output.rfind(']') {
-                    if end_pos > i {
-                        return &output[i..=end_pos];
+                // Find matching ']' by counting brackets
+                let mut depth = 0;
+                let mut end_pos = None;
+                for (j, c) in output[i..].char_indices() {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end_pos = Some(i + j);
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-            }
-        }
-    }
-
-    // Then look for '{' - JSON object
-    if let Some(brace_pos) = output.find('{') {
-        // Find the last '}' for this JSON
-        if let Some(end_pos) = output.rfind('}') {
-            if end_pos > brace_pos {
-                return &output[brace_pos..=end_pos];
+                if let Some(end) = end_pos {
+                    return &output[i..=end];
+                }
             }
         }
     }

@@ -1,3 +1,8 @@
+//! DigitalOcean provider implementation.
+//!
+//! This module implements the Provider trait for DigitalOcean's API.
+//! It handles droplet (instance) and snapshot management.
+
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -6,45 +11,429 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{Instance, InstanceConfig, InstanceStatus, Provider, Snapshot};
-use crate::error::{Result, SpuffError};
+use super::config::{ImageSpec, InstanceRequest, ProviderTimeouts, ProviderType};
+use super::error::{ProviderError, ProviderResult};
+use super::registry::ProviderFactory;
+use super::{InstanceStatus, Provider, ProviderInstance, Snapshot};
 
 const DEFAULT_API_BASE: &str = "https://api.digitalocean.com/v2";
 
+/// DigitalOcean provider implementation.
 #[derive(Debug)]
 pub struct DigitalOceanProvider {
     client: Client,
     token: String,
     base_url: String,
+    timeouts: ProviderTimeouts,
 }
 
 impl DigitalOceanProvider {
-    pub fn new(token: &str) -> Result<Self> {
-        Self::with_base_url(token, DEFAULT_API_BASE)
+    /// Create a new DigitalOcean provider with default settings.
+    pub fn new(token: &str) -> ProviderResult<Self> {
+        Self::with_config(token, DEFAULT_API_BASE, ProviderTimeouts::default())
     }
 
-    pub fn with_base_url(token: &str, base_url: &str) -> Result<Self> {
+    /// Create a new provider with custom base URL (for testing).
+    pub fn with_base_url(token: &str, base_url: &str) -> ProviderResult<Self> {
+        Self::with_config(token, base_url, ProviderTimeouts::default())
+    }
+
+    /// Create a new provider with full configuration.
+    pub fn with_config(token: &str, base_url: &str, timeouts: ProviderTimeouts) -> ProviderResult<Self> {
         if token.is_empty() {
-            return Err(SpuffError::Provider(
-                "DigitalOcean API token is required. Set DIGITALOCEAN_TOKEN or configure via 'spuff init'".to_string(),
+            return Err(ProviderError::auth(
+                "digitalocean",
+                "API token is required. Set DIGITALOCEAN_TOKEN or configure via 'spuff init'",
             ));
         }
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+            .timeout(timeouts.http_request)
+            .build()
+            .map_err(ProviderError::Network)?;
 
         Ok(Self {
             client,
             token: token.to_string(),
             base_url: base_url.to_string(),
+            timeouts,
         })
     }
 
     fn auth_header(&self) -> String {
         format!("Bearer {}", self.token)
     }
+
+    /// Resolve ImageSpec to DigitalOcean image slug or ID.
+    fn resolve_image(&self, spec: &ImageSpec) -> String {
+        match spec {
+            ImageSpec::Ubuntu(version) => {
+                let version_slug = version.replace('.', "-");
+                format!("ubuntu-{}-x64", version_slug)
+            }
+            ImageSpec::Debian(version) => {
+                format!("debian-{}-x64", version)
+            }
+            ImageSpec::Custom(id) => id.clone(),
+            ImageSpec::Snapshot(id) => id.clone(),
+        }
+    }
+
+    /// Fetch SSH key IDs from the DigitalOcean account.
+    async fn get_ssh_key_ids(&self) -> ProviderResult<Vec<String>> {
+        let response = self
+            .client
+            .get(format!("{}/account/keys", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            tracing::warn!(
+                "Failed to fetch SSH keys from DigitalOcean (HTTP {}). \
+                 Instance will be created without pre-configured SSH keys.",
+                status
+            );
+            return Ok(vec![]);
+        }
+
+        let data: SshKeysResponse = response.json().await?;
+        let keys: Vec<String> = data.ssh_keys.into_iter().map(|k| k.id.to_string()).collect();
+
+        if keys.is_empty() {
+            tracing::debug!("No SSH keys found in DigitalOcean account");
+        } else {
+            tracing::debug!("Found {} SSH key(s) in DigitalOcean account", keys.len());
+        }
+
+        Ok(keys)
+    }
+
+    /// Wait for an action to complete.
+    async fn wait_for_action(&self, action_id: u64) -> ProviderResult<()> {
+        let max_attempts = self.timeouts.action_complete_attempts();
+        let delay = self.timeouts.poll_interval;
+        let start = std::time::Instant::now();
+
+        for attempt in 0..max_attempts {
+            let response = self
+                .client
+                .get(format!("{}/actions/{}", self.base_url, action_id))
+                .header("Authorization", self.auth_header())
+                .send()
+                .await?;
+
+            if response.status().is_success() {
+                let data: ActionResponse = response.json().await?;
+                match data.action.status.as_str() {
+                    "completed" => return Ok(()),
+                    "errored" => {
+                        return Err(ProviderError::api(
+                            500,
+                            format!("Action {} failed", action_id),
+                        ));
+                    }
+                    status => {
+                        tracing::debug!(
+                            "Action {} status: {} (attempt {}/{})",
+                            action_id,
+                            status,
+                            attempt + 1,
+                            max_attempts
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(ProviderError::timeout(
+            format!("wait for action {}", action_id),
+            start.elapsed(),
+        ))
+    }
 }
+
+#[async_trait]
+impl Provider for DigitalOceanProvider {
+    fn name(&self) -> &'static str {
+        "digitalocean"
+    }
+
+    async fn create_instance(&self, request: &InstanceRequest) -> ProviderResult<ProviderInstance> {
+        let ssh_keys = self.get_ssh_key_ids().await?;
+        let image = self.resolve_image(&request.image);
+
+        // Convert labels to tags (DO uses simple string tags)
+        let tags: Vec<String> = request.labels.keys().cloned().collect();
+
+        let api_request = CreateDropletRequest {
+            name: request.name.clone(),
+            region: request.region.clone(),
+            size: request.size.clone(),
+            image,
+            ssh_keys,
+            user_data: request.user_data.clone(),
+            tags,
+            monitoring: true,
+        };
+
+        let response = self
+            .client
+            .post(format!("{}/droplets", self.base_url))
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&api_request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+
+            return Err(match status {
+                401 => ProviderError::auth("digitalocean", "Invalid API token"),
+                403 => ProviderError::auth("digitalocean", body),
+                422 => ProviderError::invalid_config("request", body),
+                429 => ProviderError::RateLimit {
+                    retry_after: Some(Duration::from_secs(60)),
+                },
+                _ => ProviderError::api(status, format!("Failed to create droplet: {}", body)),
+            });
+        }
+
+        let data: DropletResponse = response.json().await?;
+
+        Ok(ProviderInstance {
+            id: data.droplet.id.to_string(),
+            ip: "0.0.0.0".parse().unwrap(),
+            status: InstanceStatus::New,
+            created_at: Utc::now(),
+        })
+    }
+
+    async fn destroy_instance(&self, id: &str) -> ProviderResult<()> {
+        let response = self
+            .client
+            .delete(format!("{}/droplets/{}", self.base_url, id))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        // 404 is OK - instance already gone
+        if !response.status().is_success() && response.status().as_u16() != 404 {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to destroy droplet: {}", body),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn get_instance(&self, id: &str) -> ProviderResult<Option<ProviderInstance>> {
+        let response = self
+            .client
+            .get(format!("{}/droplets/{}", self.base_url, id))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to get droplet: {}", body),
+            ));
+        }
+
+        let data: DropletResponse = response.json().await?;
+        Ok(Some(data.droplet.to_provider_instance()))
+    }
+
+    async fn list_instances(&self) -> ProviderResult<Vec<ProviderInstance>> {
+        let response = self
+            .client
+            .get(format!("{}/droplets?tag_name=spuff", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to list droplets: {}", body),
+            ));
+        }
+
+        let data: DropletsResponse = response.json().await?;
+        Ok(data
+            .droplets
+            .into_iter()
+            .map(|d| d.to_provider_instance())
+            .collect())
+    }
+
+    async fn wait_ready(&self, id: &str) -> ProviderResult<ProviderInstance> {
+        let max_attempts = self.timeouts.instance_ready_attempts();
+        let delay = self.timeouts.poll_interval;
+        let start = std::time::Instant::now();
+
+        for attempt in 0..max_attempts {
+            if let Some(instance) = self.get_instance(id).await? {
+                if instance.status == InstanceStatus::Active && instance.ip.to_string() != "0.0.0.0"
+                {
+                    return Ok(instance);
+                }
+                tracing::debug!(
+                    "Instance {} status: {} ip: {} (attempt {}/{})",
+                    id,
+                    instance.status,
+                    instance.ip,
+                    attempt + 1,
+                    max_attempts
+                );
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(ProviderError::timeout("wait for instance ready", start.elapsed()))
+    }
+
+    async fn create_snapshot(&self, instance_id: &str, name: &str) -> ProviderResult<Snapshot> {
+        #[derive(Serialize)]
+        struct SnapshotAction {
+            #[serde(rename = "type")]
+            action_type: String,
+            name: String,
+        }
+
+        let request = SnapshotAction {
+            action_type: "snapshot".to_string(),
+            name: name.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(format!("{}/droplets/{}/actions", self.base_url, instance_id))
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to create snapshot: {}", body),
+            ));
+        }
+
+        let action: ActionResponse = response.json().await?;
+        self.wait_for_action(action.action.id).await?;
+
+        // Find the snapshot by name
+        let snapshots = self.list_snapshots().await?;
+        snapshots
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| {
+                ProviderError::not_found("snapshot", format!("name={}", name))
+            })
+    }
+
+    async fn list_snapshots(&self) -> ProviderResult<Vec<Snapshot>> {
+        let response = self
+            .client
+            .get(format!("{}/snapshots?resource_type=droplet", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to list snapshots: {}", body),
+            ));
+        }
+
+        let data: SnapshotsResponse = response.json().await?;
+
+        Ok(data
+            .snapshots
+            .into_iter()
+            .filter(|s| s.name.starts_with("spuff"))
+            .map(|s| Snapshot {
+                id: s.id,
+                name: s.name,
+                created_at: DateTime::parse_from_rfc3339(&s.created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .ok(),
+                size_gb: Some(s.size_gigabytes),
+            })
+            .collect())
+    }
+
+    async fn delete_snapshot(&self, id: &str) -> ProviderResult<()> {
+        let response = self
+            .client
+            .delete(format!("{}/snapshots/{}", self.base_url, id))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await?;
+
+        // 404 is OK - snapshot already gone
+        if !response.status().is_success() && response.status().as_u16() != 404 {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(
+                status,
+                format!("Failed to delete snapshot: {}", body),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn get_ssh_keys(&self) -> ProviderResult<Vec<String>> {
+        self.get_ssh_key_ids().await
+    }
+}
+
+/// Factory for creating DigitalOcean providers.
+pub struct DigitalOceanFactory;
+
+impl ProviderFactory for DigitalOceanFactory {
+    fn provider_type(&self) -> ProviderType {
+        ProviderType::DigitalOcean
+    }
+
+    fn create(&self, token: &str, timeouts: ProviderTimeouts) -> ProviderResult<Box<dyn Provider>> {
+        Ok(Box::new(DigitalOceanProvider::with_config(
+            token,
+            DEFAULT_API_BASE,
+            timeouts,
+        )?))
+    }
+}
+
+// ============================================================================
+// API Request/Response Types
+// ============================================================================
 
 #[derive(Debug, Serialize)]
 struct CreateDropletRequest {
@@ -64,8 +453,6 @@ struct DropletResponse {
     droplet: DropletData,
 }
 
-// Used for list_instances deserialization
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct DropletsResponse {
     droplets: Vec<DropletData>,
@@ -89,13 +476,6 @@ struct NetworkV4 {
     ip_address: String,
     #[serde(rename = "type")]
     network_type: String,
-}
-
-// Used for single snapshot responses (e.g., after creating a snapshot)
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct SnapshotResponse {
-    snapshot: SnapshotData,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +515,7 @@ struct SshKeyData {
 }
 
 impl DropletData {
-    fn to_instance(&self) -> Result<Instance> {
+    fn to_provider_instance(&self) -> ProviderInstance {
         let ip = self.get_public_ip().unwrap_or_else(|| "0.0.0.0".parse().unwrap());
 
         let created_at = DateTime::parse_from_rfc3339(&self.created_at)
@@ -157,12 +537,12 @@ impl DropletData {
             s => InstanceStatus::Unknown(s.to_string()),
         };
 
-        Ok(Instance {
+        ProviderInstance {
             id: self.id.to_string(),
             ip,
             status,
             created_at,
-        })
+        }
     }
 
     fn get_public_ip(&self) -> Option<IpAddr> {
@@ -174,301 +554,9 @@ impl DropletData {
     }
 }
 
-#[async_trait]
-impl Provider for DigitalOceanProvider {
-    async fn create_instance(&self, config: &InstanceConfig) -> Result<Instance> {
-        let ssh_keys = self.get_ssh_key_ids().await?;
-
-        let request = CreateDropletRequest {
-            name: config.name.clone(),
-            region: config.region.clone(),
-            size: config.size.clone(),
-            image: config.image.clone(),
-            ssh_keys,
-            user_data: config.user_data.clone(),
-            tags: config.tags.clone(),
-            monitoring: true,
-        };
-
-        let response = self
-            .client
-            .post(format!("{}/droplets", self.base_url))
-            .header("Authorization", self.auth_header())
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to create droplet: {} - {}",
-                status, body
-            )));
-        }
-
-        let data: DropletResponse = response.json().await?;
-
-        Ok(Instance {
-            id: data.droplet.id.to_string(),
-            ip: "0.0.0.0".parse().unwrap(),
-            status: InstanceStatus::New,
-            created_at: Utc::now(),
-        })
-    }
-
-    async fn destroy_instance(&self, id: &str) -> Result<()> {
-        let response = self
-            .client
-            .delete(format!("{}/droplets/{}", self.base_url, id))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if !response.status().is_success() && response.status().as_u16() != 404 {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to destroy droplet: {} - {}",
-                status, body
-            )));
-        }
-
-        Ok(())
-    }
-
-    async fn get_instance(&self, id: &str) -> Result<Option<Instance>> {
-        let response = self
-            .client
-            .get(format!("{}/droplets/{}", self.base_url, id))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if response.status().as_u16() == 404 {
-            return Ok(None);
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to get droplet: {} - {}",
-                status, body
-            )));
-        }
-
-        let data: DropletResponse = response.json().await?;
-        Ok(Some(data.droplet.to_instance()?))
-    }
-
-    async fn list_instances(&self) -> Result<Vec<Instance>> {
-        let response = self
-            .client
-            .get(format!("{}/droplets?tag_name=spuff", self.base_url))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to list droplets: {} - {}",
-                status, body
-            )));
-        }
-
-        let data: DropletsResponse = response.json().await?;
-        data.droplets
-            .into_iter()
-            .map(|d| d.to_instance())
-            .collect()
-    }
-
-    async fn wait_ready(&self, id: &str) -> Result<Instance> {
-        let max_attempts = 60;
-        let delay = Duration::from_secs(5);
-
-        for _ in 0..max_attempts {
-            if let Some(instance) = self.get_instance(id).await? {
-                if instance.status == InstanceStatus::Active
-                    && instance.ip.to_string() != "0.0.0.0"
-                {
-                    return Ok(instance);
-                }
-            }
-            tokio::time::sleep(delay).await;
-        }
-
-        Err(SpuffError::InstanceNotReady(
-            "Timeout waiting for instance".to_string(),
-        ))
-    }
-
-    async fn create_snapshot(&self, instance_id: &str, name: &str) -> Result<Snapshot> {
-        #[derive(Serialize)]
-        struct SnapshotAction {
-            #[serde(rename = "type")]
-            action_type: String,
-            name: String,
-        }
-
-        let request = SnapshotAction {
-            action_type: "snapshot".to_string(),
-            name: name.to_string(),
-        };
-
-        let response = self
-            .client
-            .post(format!("{}/droplets/{}/actions", self.base_url, instance_id))
-            .header("Authorization", self.auth_header())
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to create snapshot: {} - {}",
-                status, body
-            )));
-        }
-
-        let action: ActionResponse = response.json().await?;
-
-        self.wait_for_action(action.action.id).await?;
-
-        let snapshots = self.list_snapshots().await?;
-        snapshots
-            .into_iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| SpuffError::Provider("Snapshot not found after creation".to_string()))
-    }
-
-    async fn list_snapshots(&self) -> Result<Vec<Snapshot>> {
-        let response = self
-            .client
-            .get(format!("{}/snapshots?resource_type=droplet", self.base_url))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to list snapshots: {} - {}",
-                status, body
-            )));
-        }
-
-        let data: SnapshotsResponse = response.json().await?;
-
-        Ok(data
-            .snapshots
-            .into_iter()
-            .filter(|s| s.name.starts_with("spuff"))
-            .map(|s| Snapshot {
-                id: s.id,
-                name: s.name,
-                created_at: DateTime::parse_from_rfc3339(&s.created_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .ok(),
-                size_gb: Some(s.size_gigabytes),
-            })
-            .collect())
-    }
-
-    async fn delete_snapshot(&self, id: &str) -> Result<()> {
-        let response = self
-            .client
-            .delete(format!("{}/snapshots/{}", self.base_url, id))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if !response.status().is_success() && response.status().as_u16() != 404 {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SpuffError::Provider(format!(
-                "Failed to delete snapshot: {} - {}",
-                status, body
-            )));
-        }
-
-        Ok(())
-    }
-}
-
-impl DigitalOceanProvider {
-    /// Fetches SSH key IDs from the DigitalOcean account.
-    ///
-    /// Returns an empty list if fetching fails, allowing instance creation
-    /// to continue (the user can still SSH using their local key).
-    async fn get_ssh_key_ids(&self) -> Result<Vec<String>> {
-        let response = self
-            .client
-            .get(format!("{}/account/keys", self.base_url))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            tracing::warn!(
-                "Failed to fetch SSH keys from DigitalOcean (HTTP {}). \
-                 Instance will be created without pre-configured SSH keys.",
-                status
-            );
-            return Ok(vec![]);
-        }
-
-        let data: SshKeysResponse = response.json().await?;
-        let keys: Vec<String> = data.ssh_keys.into_iter().map(|k| k.id.to_string()).collect();
-
-        if keys.is_empty() {
-            tracing::debug!("No SSH keys found in DigitalOcean account");
-        } else {
-            tracing::debug!("Found {} SSH key(s) in DigitalOcean account", keys.len());
-        }
-
-        Ok(keys)
-    }
-
-    async fn wait_for_action(&self, action_id: u64) -> Result<()> {
-        let max_attempts = 120;
-        let delay = Duration::from_secs(5);
-
-        for _ in 0..max_attempts {
-            let response = self
-                .client
-                .get(format!("{}/actions/{}", self.base_url, action_id))
-                .header("Authorization", self.auth_header())
-                .send()
-                .await?;
-
-            if response.status().is_success() {
-                let data: ActionResponse = response.json().await?;
-                match data.action.status.as_str() {
-                    "completed" => return Ok(()),
-                    "errored" => {
-                        return Err(SpuffError::Provider("Action failed".to_string()));
-                    }
-                    _ => {}
-                }
-            }
-            tokio::time::sleep(delay).await;
-        }
-
-        Err(SpuffError::Provider(
-            "Timeout waiting for action".to_string(),
-        ))
-    }
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -481,7 +569,7 @@ mod tests {
         let result = DigitalOceanProvider::new("");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("API token is required"));
+        assert!(matches!(err, ProviderError::Authentication { .. }));
     }
 
     #[test]
@@ -494,6 +582,37 @@ mod tests {
     fn test_auth_header() {
         let provider = DigitalOceanProvider::new("my-secret-token").unwrap();
         assert_eq!(provider.auth_header(), "Bearer my-secret-token");
+    }
+
+    #[test]
+    fn test_resolve_image_ubuntu() {
+        let provider = DigitalOceanProvider::new("token").unwrap();
+        assert_eq!(
+            provider.resolve_image(&ImageSpec::ubuntu("24.04")),
+            "ubuntu-24-04-x64"
+        );
+        assert_eq!(
+            provider.resolve_image(&ImageSpec::ubuntu("22.04")),
+            "ubuntu-22-04-x64"
+        );
+    }
+
+    #[test]
+    fn test_resolve_image_debian() {
+        let provider = DigitalOceanProvider::new("token").unwrap();
+        assert_eq!(
+            provider.resolve_image(&ImageSpec::debian("12")),
+            "debian-12-x64"
+        );
+    }
+
+    #[test]
+    fn test_resolve_image_custom() {
+        let provider = DigitalOceanProvider::new("token").unwrap();
+        assert_eq!(
+            provider.resolve_image(&ImageSpec::custom("my-custom-image")),
+            "my-custom-image"
+        );
     }
 
     #[test]
@@ -514,7 +633,7 @@ mod tests {
                 networks: Networks { v4: vec![] },
             };
 
-            let instance = droplet.to_instance().unwrap();
+            let instance = droplet.to_provider_instance();
             assert_eq!(instance.status, expected_status);
         }
     }
@@ -539,7 +658,7 @@ mod tests {
             },
         };
 
-        let instance = droplet.to_instance().unwrap();
+        let instance = droplet.to_provider_instance();
         assert_eq!(instance.ip.to_string(), "192.168.1.100");
     }
 
@@ -552,7 +671,7 @@ mod tests {
             networks: Networks { v4: vec![] },
         };
 
-        let instance = droplet.to_instance().unwrap();
+        let instance = droplet.to_provider_instance();
         assert_eq!(instance.ip.to_string(), "0.0.0.0");
     }
 
@@ -560,19 +679,15 @@ mod tests {
     async fn test_create_instance_success() {
         let mock_server = MockServer::start().await;
 
-        // Mock SSH keys endpoint
         Mock::given(method("GET"))
             .and(path("/account/keys"))
             .and(header("Authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ssh_keys": [
-                    {"id": 123456, "fingerprint": "aa:bb:cc"}
-                ]
+                "ssh_keys": [{"id": 123456, "fingerprint": "aa:bb:cc"}]
             })))
             .mount(&mock_server)
             .await;
 
-        // Mock create droplet endpoint
         Mock::given(method("POST"))
             .and(path("/droplets"))
             .and(header("Authorization", "Bearer test-token"))
@@ -588,17 +703,11 @@ mod tests {
             .await;
 
         let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
-        let config = InstanceConfig {
-            name: "test-instance".to_string(),
-            region: "nyc1".to_string(),
-            size: "s-2vcpu-4gb".to_string(),
-            image: "ubuntu-24-04-x64".to_string(),
-            ssh_keys: vec![],
-            user_data: None,
-            tags: vec!["spuff".to_string()],
-        };
+        let request = InstanceRequest::new("test-instance", "nyc1", "s-2vcpu-4gb")
+            .with_image(ImageSpec::ubuntu("24.04"))
+            .with_label("spuff", "true");
 
-        let result = provider.create_instance(&config).await;
+        let result = provider.create_instance(&request).await;
         assert!(result.is_ok());
 
         let instance = result.unwrap();
@@ -625,19 +734,11 @@ mod tests {
             .await;
 
         let provider = DigitalOceanProvider::with_base_url("bad-token", &mock_server.uri()).unwrap();
-        let config = InstanceConfig {
-            name: "test".to_string(),
-            region: "nyc1".to_string(),
-            size: "s-1vcpu-1gb".to_string(),
-            image: "ubuntu".to_string(),
-            ssh_keys: vec![],
-            user_data: None,
-            tags: vec![],
-        };
+        let request = InstanceRequest::new("test", "nyc1", "s-1vcpu-1gb");
 
-        let result = provider.create_instance(&config).await;
+        let result = provider.create_instance(&request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to create droplet"));
+        assert!(matches!(result.unwrap_err(), ProviderError::Authentication { .. }));
     }
 
     #[tokio::test]
@@ -653,10 +754,7 @@ mod tests {
                     "status": "active",
                     "created_at": "2024-01-01T00:00:00Z",
                     "networks": {
-                        "v4": [{
-                            "ip_address": "1.2.3.4",
-                            "type": "public"
-                        }]
+                        "v4": [{"ip_address": "1.2.3.4", "type": "public"}]
                     }
                 }
             })))
@@ -723,7 +821,6 @@ mod tests {
         let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.destroy_instance("22222").await;
 
-        // Should succeed even if droplet doesn't exist
         assert!(result.is_ok());
     }
 
@@ -800,7 +897,6 @@ mod tests {
 
         assert!(result.is_ok());
         let snapshots = result.unwrap();
-        // Only spuff-* snapshots should be returned
         assert_eq!(snapshots.len(), 2);
         assert!(snapshots.iter().all(|s| s.name.starts_with("spuff")));
     }
@@ -880,8 +976,24 @@ mod tests {
         let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_ssh_key_ids().await;
 
-        // Should return empty vec on error, not fail
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_factory_creates_provider() {
+        let factory = DigitalOceanFactory;
+        assert_eq!(factory.provider_type(), ProviderType::DigitalOcean);
+        assert!(factory.is_implemented());
+
+        let result = factory.create("test-token", ProviderTimeouts::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_factory_empty_token_fails() {
+        let factory = DigitalOceanFactory;
+        let result = factory.create("", ProviderTimeouts::default());
+        assert!(matches!(result, Err(ProviderError::Authentication { .. })));
     }
 }

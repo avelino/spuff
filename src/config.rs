@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SpuffError};
+use crate::provider::ProviderType;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -131,6 +132,51 @@ impl AppConfig {
 
     pub fn parse_idle_timeout(&self) -> std::time::Duration {
         parse_duration(&self.idle_timeout).unwrap_or(std::time::Duration::from_secs(7200))
+    }
+
+    /// Validate the configuration.
+    ///
+    /// Returns an error if the configuration is invalid (e.g., unknown provider).
+    pub fn validate(&self) -> Result<()> {
+        // Validate provider
+        if ProviderType::from_str(&self.provider).is_none() {
+            return Err(SpuffError::Config(format!(
+                "Unknown provider '{}'. Supported providers: {:?}",
+                self.provider,
+                ProviderType::supported_names()
+            )));
+        }
+
+        // Validate idle timeout is parseable
+        if parse_duration(&self.idle_timeout).is_none() {
+            return Err(SpuffError::Config(format!(
+                "Invalid idle_timeout '{}'. Use format like '2h', '30m', or '3600'",
+                self.idle_timeout
+            )));
+        }
+
+        // Validate SSH key path exists
+        let ssh_path = shellexpand::tilde(&self.ssh_key_path);
+        if !std::path::Path::new(ssh_path.as_ref()).exists() {
+            return Err(SpuffError::Config(format!(
+                "SSH key not found at '{}'. Generate one with: ssh-keygen -t ed25519",
+                self.ssh_key_path
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get the provider type enum.
+    pub fn provider_type(&self) -> Option<ProviderType> {
+        ProviderType::from_str(&self.provider)
+    }
+
+    /// Check if the configured provider is implemented.
+    pub fn is_provider_implemented(&self) -> bool {
+        self.provider_type()
+            .map(|p| p.is_implemented())
+            .unwrap_or(false)
     }
 }
 
@@ -354,5 +400,52 @@ ssh_user: root
 
         // Cleanup
         std::env::remove_var("DIGITALOCEAN_TOKEN");
+    }
+
+    #[test]
+    fn test_provider_type_methods() {
+        let config = AppConfig {
+            provider: "digitalocean".to_string(),
+            ..Default::default()
+        };
+        assert!(config.provider_type().is_some());
+        assert!(config.is_provider_implemented());
+
+        let config = AppConfig {
+            provider: "hetzner".to_string(),
+            ..Default::default()
+        };
+        assert!(config.provider_type().is_some());
+        assert!(!config.is_provider_implemented());
+
+        let config = AppConfig {
+            provider: "unknown".to_string(),
+            ..Default::default()
+        };
+        assert!(config.provider_type().is_none());
+        assert!(!config.is_provider_implemented());
+    }
+
+    #[test]
+    fn test_validate_invalid_provider() {
+        let config = AppConfig {
+            provider: "invalid_provider".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_validate_invalid_idle_timeout() {
+        let config = AppConfig {
+            provider: "digitalocean".to_string(),
+            idle_timeout: "invalid".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid idle_timeout"));
     }
 }

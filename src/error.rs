@@ -1,10 +1,17 @@
 use thiserror::Error;
 
+use crate::provider::ProviderError;
+
 #[derive(Error, Debug)]
 pub enum SpuffError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Provider error: {0}")]
+    ProviderError(#[from] ProviderError),
+
+    /// Legacy provider error for backward compatibility.
+    /// New code should use `ProviderError` variants directly.
     #[error("Provider error: {0}")]
     Provider(String),
 

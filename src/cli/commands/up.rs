@@ -9,8 +9,8 @@ use crate::config::AppConfig;
 use crate::connector::ssh::{wait_for_ssh, wait_for_ssh_login};
 use crate::environment::cloud_init::generate_cloud_init;
 use crate::error::{Result, SpuffError};
-use crate::provider::{create_provider, InstanceConfig};
-use crate::state::StateDb;
+use crate::provider::{create_provider, ImageSpec, InstanceRequest};
+use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
 
 const STEP_CLOUD_INIT: usize = 0;
@@ -325,24 +325,25 @@ async fn provision_instance(
         .await
         .ok();
 
-    let instance_config = InstanceConfig {
-        name: generate_instance_name(),
-        region: region.unwrap_or_else(|| config.region.clone()),
-        size: size.unwrap_or_else(|| config.size.clone()),
-        image: snapshot.unwrap_or_else(|| get_default_image(&config.provider)),
-        ssh_keys: vec![],
-        user_data: Some(user_data),
-        tags: vec!["spuff".to_string()],
-    };
+    let instance_name = generate_instance_name();
+    let instance_region = region.unwrap_or_else(|| config.region.clone());
+    let instance_size = size.unwrap_or_else(|| config.size.clone());
+    let image = get_image_spec(&config.provider, snapshot);
 
-    let instance = match provider.create_instance(&instance_config).await {
+    let request = InstanceRequest::new(instance_name.clone(), instance_region.clone(), instance_size.clone())
+        .with_image(image)
+        .with_user_data(user_data)
+        .with_label("spuff", "true")
+        .with_label("managed-by", "spuff-cli");
+
+    let instance = match provider.create_instance(&request).await {
         Ok(i) => i,
         Err(e) => {
             tx.send(ProgressMessage::SetStep(STEP_CREATE, StepState::Failed))
                 .await
                 .ok();
             tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -365,20 +366,19 @@ async fn provision_instance(
                 .await
                 .ok();
             tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
-            return Err(e);
+            return Err(e.into());
         }
     };
 
     // Save instance early so we don't lose track if something fails
-    db.save_instance(&crate::state::Instance {
-        id: instance.id.clone(),
-        name: instance_config.name.clone(),
-        ip: instance.ip.to_string(),
-        provider: config.provider.clone(),
-        region: instance_config.region.clone(),
-        size: instance_config.size.clone(),
-        created_at: chrono::Utc::now(),
-    })?;
+    let local_instance = LocalInstance::from_provider(
+        &instance,
+        instance_name.clone(),
+        config.provider.clone(),
+        instance_region.clone(),
+        instance_size.clone(),
+    );
+    db.save_instance(&local_instance)?;
 
     tx.send(ProgressMessage::SetStep(STEP_WAIT_READY, StepState::Done))
         .await
@@ -479,7 +479,7 @@ async fn provision_instance(
 
     // Complete!
     tx.send(ProgressMessage::Complete(
-        instance_config.name.clone(),
+        instance_name.clone(),
         instance.ip.to_string(),
     ))
     .await
@@ -498,12 +498,25 @@ fn generate_instance_name() -> String {
     format!("spuff-{}", id)
 }
 
-fn get_default_image(provider: &str) -> String {
+/// Get the appropriate image specification for the instance.
+///
+/// If a snapshot ID is provided, uses that. Otherwise, defaults to Ubuntu 24.04.
+fn get_image_spec(provider: &str, snapshot: Option<String>) -> ImageSpec {
+    if let Some(snapshot_id) = snapshot {
+        // User provided a snapshot ID
+        return ImageSpec::snapshot(snapshot_id);
+    }
+
+    // Default to Ubuntu 24.04 for all providers
     match provider {
-        "digitalocean" => "ubuntu-24-04-x64".to_string(),
-        "hetzner" => "ubuntu-24.04".to_string(),
-        "aws" => "ami-0c55b159cbfafe1f0".to_string(),
-        _ => "ubuntu-24-04-x64".to_string(),
+        "aws" => {
+            // AWS uses AMI IDs - this is a placeholder, should come from config
+            ImageSpec::custom("ami-0c55b159cbfafe1f0")
+        }
+        _ => {
+            // Most providers support Ubuntu slug
+            ImageSpec::ubuntu("24.04")
+        }
     }
 }
 
