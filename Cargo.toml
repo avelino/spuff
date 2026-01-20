@@ -79,7 +79,7 @@ regex-lite = "0.1"
 
 # SSH - Pure Rust implementation (no external binaries)
 # NOTE: 0.48 has a bug with RSA SHA2 agent auth - workaround implemented in client.rs
-russh = "0.48"
+russh = "0.56"
 russh-keys = "0.48"
 russh-sftp = "2.1"
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "encryption"] }
