@@ -31,6 +31,8 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - {{ ssh_public_key }}
+{% if spuff_public_key %}      - {{ spuff_public_key }}
+{% endif %}
 
 write_files:
   # Store username for agent devtools installation
@@ -427,6 +429,11 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
     let ssh_public_key = read_ssh_public_key(&config.ssh_key_path)?;
     let idle_timeout_seconds = config.parse_idle_timeout().as_secs();
 
+    // Get spuff managed key (ed25519) - this avoids RSA SHA2 issues with russh
+    let spuff_public_key = crate::ssh::managed_key::get_managed_public_key()
+        .ok()
+        .filter(|k| !k.is_empty());
+
     // Determine home directory based on username
     let home_dir = if config.ssh_user == "root" {
         "/root".to_string()
@@ -444,6 +451,7 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
     context.insert("username", &config.ssh_user);
     context.insert("home_dir", &home_dir);
     context.insert("ssh_public_key", &ssh_public_key);
+    context.insert("spuff_public_key", &spuff_public_key);
     context.insert("environment", &config.environment);
     context.insert("dotfiles", &config.dotfiles);
     context.insert("idle_timeout_seconds", &idle_timeout_seconds);

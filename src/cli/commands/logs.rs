@@ -212,113 +212,6 @@ fn print_log_line(line: &str) {
     }
 }
 
-/// List available log files on the remote
-pub async fn list_available_logs(ip: &str, config: &AppConfig) -> Result<Vec<String>> {
-    let cmd = r#"
-find /var/log/spuff -type f -name "*.log" 2>/dev/null | sort || echo ""
-"#;
-
-    let output = crate::connector::ssh::run_command(ip, config, cmd).await?;
-    let logs: Vec<String> = output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
-
-    Ok(logs)
-}
-
-/// Show a summary of all project logs
-pub async fn show_logs_summary(config: &AppConfig) -> Result<()> {
-    let db = StateDb::open()?;
-
-    let instance = db
-        .get_active_instance()?
-        .ok_or(SpuffError::NoActiveInstance)?;
-
-    println!();
-    println!("  {}", style("Available Project Logs").cyan().bold());
-    println!("  {}", style("─".repeat(40)).dim());
-    println!();
-
-    let logs = list_available_logs(&instance.ip, config).await?;
-
-    if logs.is_empty() {
-        println!(
-            "  {} No project logs found yet.",
-            style("○").dim()
-        );
-        println!();
-        println!(
-            "  {} Project setup may not have started.",
-            style("Hint:").dim()
-        );
-    } else {
-        for log_path in logs {
-            // Extract relative path from /var/log/spuff/
-            let display_path = log_path
-                .strip_prefix("/var/log/spuff/")
-                .unwrap_or(&log_path);
-
-            // Get file size
-            let size_cmd = format!("stat -c%s {} 2>/dev/null || echo '0'", log_path);
-            let size = crate::connector::ssh::run_command(&instance.ip, config, &size_cmd)
-                .await
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(0);
-
-            let size_str = format_size(size);
-
-            println!(
-                "  {} {} {}",
-                style("●").green(),
-                display_path,
-                style(format!("({})", size_str)).dim()
-            );
-        }
-    }
-
-    println!();
-    println!("  {}", style("Usage:").dim().bold());
-    println!(
-        "    {} {}",
-        style("spuff logs").cyan(),
-        style("# General setup log").dim()
-    );
-    println!(
-        "    {} {}",
-        style("spuff logs --bundle rust").cyan(),
-        style("# Rust bundle log").dim()
-    );
-    println!(
-        "    {} {}",
-        style("spuff logs --packages").cyan(),
-        style("# Package installation").dim()
-    );
-    println!(
-        "    {} {}",
-        style("spuff logs -f").cyan(),
-        style("# Follow mode").dim()
-    );
-    println!();
-
-    Ok(())
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-
-    if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,14 +234,5 @@ mod tests {
             LogCategory::Script.log_path(None, Some(1)),
             "/var/log/spuff/scripts/001.log"
         );
-    }
-
-    #[test]
-    fn test_format_size() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(500), "500 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1048576), "1.0 MB");
     }
 }

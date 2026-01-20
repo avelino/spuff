@@ -1,305 +1,104 @@
-use std::process::Stdio;
-use std::time::Duration;
+//! SSH connection utilities using pure Rust.
+//!
+//! This module provides SSH connectivity using the russh library,
+//! eliminating the need for external SSH binaries.
 
-use tokio::net::TcpStream;
-use tokio::process::Command;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
+use crate::ssh::{SshClient, SshConfig};
 
-/// Check if mosh is available locally
-pub fn is_mosh_available() -> bool {
-    std::process::Command::new("which")
-        .arg("mosh")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Connect to remote host via mosh (requires mosh installed locally and on server)
-pub async fn connect_mosh(host: &str, config: &AppConfig) -> Result<()> {
-    let mut cmd = Command::new("mosh");
-
-    // mosh uses --ssh to pass SSH options
-    let ssh_options = format!(
-        "ssh -A -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i {}",
-        &config.ssh_key_path
-    );
-
-    cmd.arg("--ssh")
-        .arg(&ssh_options)
-        .arg(format!("{}@{}", config.ssh_user, host));
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(SpuffError::Ssh(format!(
-            "Mosh connection failed with code: {:?}",
-            status.code()
-        )));
+/// Convert AppConfig to SshConfig for SSH operations.
+fn app_config_to_ssh_config(config: &AppConfig) -> SshConfig {
+    SshConfig {
+        user: config.ssh_user.clone(),
+        key_path: PathBuf::from(&config.ssh_key_path),
+        host_key_policy: crate::ssh::config::HostKeyPolicy::AcceptNew,
     }
-
-    Ok(())
 }
 
+/// Wait for SSH port to be reachable (TCP connectivity check).
+///
+/// This is a pure Rust implementation using tokio TcpStream.
 pub async fn wait_for_ssh(host: &str, port: u16, timeout: Duration) -> Result<()> {
-    let start = std::time::Instant::now();
-    let addr = format!("{}:{}", host, port);
-
-    // Wait for TCP port to be open
-    while start.elapsed() < timeout {
-        match TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-
-    if start.elapsed() >= timeout {
-        return Err(SpuffError::Ssh(format!(
-            "Timeout waiting for SSH port on {}",
-            addr
-        )));
-    }
-
-    Ok(())
+    crate::ssh::wait_for_ssh(host, port, timeout).await
 }
 
-/// Wait for SSH login to actually work (user exists and key is configured)
-/// If BatchMode fails due to passphrase, prompts user interactively
+/// Wait for SSH login to actually work (user exists and key is configured).
+///
+/// Uses pure Rust SSH library (russh) instead of external ssh binary.
 pub async fn wait_for_ssh_login(host: &str, config: &AppConfig, timeout: Duration) -> Result<()> {
-    let start = std::time::Instant::now();
-    let mut prompted_for_passphrase = false;
-
-    while start.elapsed() < timeout {
-        // Try to run a simple command with BatchMode (no interactive prompts)
-        let result = Command::new("ssh")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            .arg("-o")
-            .arg("LogLevel=ERROR")
-            .arg("-o")
-            .arg("ConnectTimeout=5")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-i")
-            .arg(&config.ssh_key_path)
-            .arg(format!("{}@{}", config.ssh_user, host))
-            .arg("echo ok")
-            .output()
-            .await;
-
-        if let Ok(output) = result {
-            if output.status.success() {
-                return Ok(());
-            }
-
-            // Check if it's a permission/auth issue (not just "user doesn't exist yet")
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !prompted_for_passphrase
-                && (stderr.contains("Permission denied")
-                    || stderr.contains("passphrase")
-                    || stderr.contains("Authentication failed"))
-            {
-                prompted_for_passphrase = true;
-
-                // Try interactive SSH to allow passphrase entry
-                eprintln!("\n🔑 SSH key may need passphrase. Trying interactive connection...\n");
-
-                let interactive_result = Command::new("ssh")
-                    .arg("-o")
-                    .arg("StrictHostKeyChecking=accept-new")
-                    .arg("-o")
-                    .arg("UserKnownHostsFile=/dev/null")
-                    .arg("-o")
-                    .arg("LogLevel=ERROR")
-                    .arg("-o")
-                    .arg("ConnectTimeout=10")
-                    .arg("-i")
-                    .arg(&config.ssh_key_path)
-                    .arg(format!("{}@{}", config.ssh_user, host))
-                    .arg("echo ok")
-                    .stdin(Stdio::inherit())
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .await;
-
-                if let Ok(status) = interactive_result {
-                    if status.success() {
-                        eprintln!();
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-
-    Err(SpuffError::Ssh(format!(
-        "Timeout waiting for SSH login as {}@{}. Make sure 'ssh-add' was run if your key has a passphrase.",
-        config.ssh_user, host
-    )))
+    let ssh_config = app_config_to_ssh_config(config);
+    crate::ssh::wait_for_ssh_login(host, &ssh_config, timeout).await
 }
 
-/// Connect to remote host, preferring mosh if available locally (falls back to SSH)
-pub async fn connect(host: &str, config: &AppConfig) -> Result<()> {
-    // Try mosh first if available locally
-    if is_mosh_available() {
-        eprintln!("  Using mosh for better latency...");
-        match connect_mosh(host, config).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                eprintln!("  Mosh failed ({}), falling back to SSH...", e);
-            }
-        }
-    }
+/// Connect to remote host via SSH (interactive shell).
+///
+/// Uses pure Rust SSH implementation with PTY support.
+pub async fn connect_ssh(host: &str, config: &AppConfig) -> Result<()> {
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(host, 22, &ssh_config).await?;
+    client.shell().await
+}
 
-    // Fallback to SSH
+/// Connect to remote host (SSH only, mosh support removed).
+///
+/// Note: mosh support has been removed. Use connect_ssh() directly.
+pub async fn connect(host: &str, config: &AppConfig) -> Result<()> {
     connect_ssh(host, config).await
 }
 
-/// Connect to remote host via SSH only
-pub async fn connect_ssh(host: &str, config: &AppConfig) -> Result<()> {
-    let mut cmd = Command::new("ssh");
-
-    cmd.arg("-A") // Enable SSH agent forwarding for git operations
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, host));
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(SpuffError::Ssh(format!(
-            "SSH connection failed with code: {:?}",
-            status.code()
-        )));
-    }
-
-    Ok(())
-}
-
-/// Execute a command interactively with TTY support
+/// Execute a command interactively with TTY support.
+///
+/// Uses pure Rust SSH implementation with PTY allocation.
 pub async fn exec_interactive(host: &str, config: &AppConfig, command: &str) -> Result<i32> {
-    let mut cmd = Command::new("ssh");
-
-    cmd.arg("-t") // Force pseudo-terminal allocation for interactive commands
-        .arg("-A") // Enable SSH agent forwarding
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, host))
-        .arg(command);
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-
-    Ok(status.code().unwrap_or(1))
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(host, 22, &ssh_config).await?;
+    client.exec_interactive(command).await
 }
 
-/// Upload a file to the remote host via SCP
+/// Upload a file to the remote host via SFTP.
+///
+/// Uses pure Rust SFTP implementation (replaces scp binary).
 pub async fn scp_upload(
     host: &str,
     config: &AppConfig,
     local_path: &str,
     remote_path: &str,
 ) -> Result<()> {
-    let output = Command::new("scp")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-o")
-        .arg("BatchMode=yes") // Fail fast if key needs passphrase
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(local_path)
-        .arg(format!("{}@{}:{}", config.ssh_user, host, remote_path))
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Check for passphrase-related errors
-        if stderr.contains("Permission denied") || stderr.contains("passphrase") {
-            return Err(SpuffError::Ssh(
-                "SSH key requires passphrase. Run 'ssh-add' first to add your key to the agent.".to_string()
-            ));
-        }
-        return Err(SpuffError::Ssh(format!("SCP upload failed: {}", stderr)));
-    }
-
-    Ok(())
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(host, 22, &ssh_config).await?;
+    let sftp = client.sftp().await?;
+    sftp.upload(local_path, remote_path).await
 }
 
+/// Execute a non-interactive command and return stdout.
+///
+/// Uses pure Rust SSH implementation.
 pub async fn run_command(host: &str, config: &AppConfig, command: &str) -> Result<String> {
-    // Wrap command in bash --norc to avoid loading .bashrc which may print banners
-    let wrapped_command = format!("bash --norc --noprofile -c '{}'", command.replace('\'', "'\\''"));
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(host, 22, &ssh_config).await?;
+    let output = client.exec(command).await?;
 
-    let output = Command::new("ssh")
-        .arg("-T") // Disable pseudo-terminal allocation
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-o")
-        .arg("BatchMode=yes") // Fail fast if key needs passphrase
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, host))
-        .arg(&wrapped_command)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.success {
         // Check for passphrase-related errors
-        if stderr.contains("Permission denied") || stderr.contains("passphrase") {
+        if output.stderr.contains("Permission denied") || output.stderr.contains("passphrase") {
             return Err(SpuffError::Ssh(
-                "SSH key requires passphrase. Run 'ssh-add' first to add your key to the agent.".to_string()
+                "SSH key requires passphrase. Run 'ssh-add' first to add your key to the agent."
+                    .to_string(),
             ));
         }
-        return Err(SpuffError::Ssh(format!("Command failed: {}", stderr)));
+        return Err(SpuffError::Ssh(format!("Command failed: {}", output.stderr)));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
+
+// Note: The following functions have been removed as per the migration plan:
+// - is_mosh_available() - mosh support removed
+// - connect_mosh() - mosh support removed
 
 #[cfg(test)]
 mod tests {

@@ -118,49 +118,6 @@ pub enum Repository {
     Full(RepositoryConfig),
 }
 
-impl Repository {
-    /// Get the repository URL
-    pub fn url(&self) -> String {
-        match self {
-            Repository::Short(short) => {
-                if short.contains("://") || short.contains('@') {
-                    short.clone()
-                } else {
-                    format!("git@github.com:{}.git", short)
-                }
-            }
-            Repository::Full(config) => config.url.clone(),
-        }
-    }
-
-    /// Get the target path for cloning
-    pub fn path(&self) -> Option<String> {
-        match self {
-            Repository::Short(short) => {
-                let repo_name = short.split('/').last().unwrap_or(short);
-                Some(format!("~/projects/{}", repo_name))
-            }
-            Repository::Full(config) => config.path.clone().or_else(|| {
-                let repo_name = config
-                    .url
-                    .split('/')
-                    .last()
-                    .unwrap_or(&config.url)
-                    .trim_end_matches(".git");
-                Some(format!("~/projects/{}", repo_name))
-            }),
-        }
-    }
-
-    /// Get the branch to checkout
-    pub fn branch(&self) -> Option<String> {
-        match self {
-            Repository::Short(_) => None,
-            Repository::Full(config) => config.branch.clone(),
-        }
-    }
-}
-
 /// Full repository configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryConfig {
@@ -293,54 +250,6 @@ impl ProjectConfig {
             .map(|(k, v)| (k.clone(), resolve_env_value(v)))
             .collect();
         self.env = resolved;
-    }
-
-    /// Get the project name (from config or directory name)
-    pub fn project_name(&self) -> String {
-        if let Some(ref name) = self.name {
-            return name.clone();
-        }
-
-        // Fall back to current directory name
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "spuff-project".to_string())
-    }
-
-    /// Validate the configuration
-    pub fn validate(&self) -> Result<()> {
-        // Validate bundles
-        let valid_bundles = [
-            "rust", "go", "python", "node", "elixir", "java", "zig", "cpp", "ruby",
-        ];
-        for bundle in &self.bundles {
-            if !valid_bundles.contains(&bundle.as_str()) {
-                return Err(SpuffError::Config(format!(
-                    "Unknown bundle '{}'. Valid bundles: {:?}",
-                    bundle, valid_bundles
-                )));
-            }
-        }
-
-        // Validate ports are in valid range
-        for port in &self.ports {
-            if *port == 0 || *port > 65535 {
-                return Err(SpuffError::Config(format!(
-                    "Invalid port number: {}",
-                    port
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Convert to JSON for sending to the agent
-    pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|e| {
-            SpuffError::Config(format!("Failed to serialize project config: {}", e))
-        })
     }
 }
 
@@ -504,9 +413,11 @@ repositories:
         let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.repositories.len(), 2);
 
-        let repo = &config.repositories[0];
-        assert_eq!(repo.url(), "git@github.com:owner/repo.git");
-        assert_eq!(repo.path(), Some("~/projects/repo".to_string()));
+        // Verify short format parsed correctly
+        match &config.repositories[0] {
+            Repository::Short(s) => assert_eq!(s, "owner/repo"),
+            Repository::Full(_) => panic!("Expected short format"),
+        }
     }
 
     #[test]
@@ -519,10 +430,16 @@ repositories:
 "#;
 
         let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
-        let repo = &config.repositories[0];
-        assert_eq!(repo.url(), "git@github.com:empresa/backend.git");
-        assert_eq!(repo.path(), Some("~/projects/backend".to_string()));
-        assert_eq!(repo.branch(), Some("develop".to_string()));
+
+        // Verify full format parsed correctly
+        match &config.repositories[0] {
+            Repository::Full(repo) => {
+                assert_eq!(repo.url, "git@github.com:empresa/backend.git");
+                assert_eq!(repo.path, Some("~/projects/backend".to_string()));
+                assert_eq!(repo.branch, Some("develop".to_string()));
+            }
+            Repository::Short(_) => panic!("Expected full format"),
+        }
     }
 
     #[test]
@@ -621,64 +538,11 @@ hooks:
     }
 
     #[test]
-    fn test_validate_valid_bundles() {
-        let config = ProjectConfig {
-            bundles: vec!["rust".to_string(), "go".to_string(), "python".to_string()],
-            ..Default::default()
-        };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_invalid_bundle() {
-        let config = ProjectConfig {
-            bundles: vec!["invalid_bundle".to_string()],
-            ..Default::default()
-        };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown bundle"));
-    }
-
-    #[test]
-    fn test_validate_invalid_port() {
-        let config = ProjectConfig {
-            ports: vec![0],
-            ..Default::default()
-        };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid port"));
-    }
-
-    #[test]
     fn test_default_config() {
         let config = ProjectConfig::default();
         assert_eq!(config.version, "1");
         assert!(config.bundles.is_empty());
         assert!(config.packages.is_empty());
         assert!(config.services.enabled);
-    }
-
-    #[test]
-    fn test_project_name_from_config() {
-        let config = ProjectConfig {
-            name: Some("my-custom-name".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(config.project_name(), "my-custom-name");
-    }
-
-    #[test]
-    fn test_config_to_json() {
-        let config = ProjectConfig {
-            name: Some("test".to_string()),
-            bundles: vec!["rust".to_string()],
-            ..Default::default()
-        };
-
-        let json = config.to_json().unwrap();
-        assert!(json.contains("\"name\":\"test\""));
-        assert!(json.contains("\"bundles\":[\"rust\"]"));
     }
 }
