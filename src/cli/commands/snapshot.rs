@@ -11,7 +11,13 @@ pub async fn create(config: &AppConfig, name: Option<String>) -> Result<()> {
         .get_active_instance()?
         .ok_or(SpuffError::NoActiveInstance)?;
 
-    let snapshot_name = name.unwrap_or_else(|| format!("{}-{}", instance.name, chrono::Utc::now().format("%Y%m%d-%H%M")));
+    let snapshot_name = name.unwrap_or_else(|| {
+        format!(
+            "{}-{}",
+            instance.name,
+            chrono::Utc::now().format("%Y%m%d-%H%M")
+        )
+    });
 
     println!(
         "{} Creating snapshot of {}...",
@@ -20,7 +26,9 @@ pub async fn create(config: &AppConfig, name: Option<String>) -> Result<()> {
     );
 
     let provider = create_provider(config)?;
-    let snapshot = provider.create_snapshot(&instance.id, &snapshot_name).await?;
+    let snapshot = provider
+        .create_snapshot(&instance.id, &snapshot_name)
+        .await?;
 
     println!(
         "\n{} Snapshot created: {}",
@@ -51,7 +59,10 @@ pub async fn list(config: &AppConfig) -> Result<()> {
             style(&snapshot.name).white()
         );
         if let Some(created) = snapshot.created_at {
-            println!("    Created: {}", style(created.format("%Y-%m-%d %H:%M")).dim());
+            println!(
+                "    Created: {}",
+                style(created.format("%Y-%m-%d %H:%M")).dim()
+            );
         }
     }
 
@@ -69,10 +80,7 @@ pub async fn delete(config: &AppConfig, id: String) -> Result<()> {
 
     provider.delete_snapshot(&id).await?;
 
-    println!(
-        "{} Snapshot deleted.",
-        style("✓").green().bold()
-    );
+    println!("{} Snapshot deleted.", style("✓").green().bold());
 
     Ok(())
 }

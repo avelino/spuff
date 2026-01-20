@@ -142,7 +142,9 @@ pub async fn status(config: &AppConfig) -> Result<()> {
     );
 
     // Fetch and display recent activity log
-    if let Ok(activity) = agent_request::<ActivityLogResponse>(&instance.ip, config, "/activity?limit=10").await {
+    if let Ok(activity) =
+        agent_request::<ActivityLogResponse>(&instance.ip, config, "/activity?limit=10").await
+    {
         if !activity.entries.is_empty() {
             println!("\n{}", style("Recent Activity").bold().cyan());
             for entry in activity.entries.iter().take(10) {
@@ -173,10 +175,7 @@ pub async fn metrics(config: &AppConfig) -> Result<()> {
     println!("  Hostname:     {}", style(&metrics.hostname).white());
     println!("  OS:           {}", style(&metrics.os).dim());
     println!("  CPUs:         {}", style(metrics.cpus).white());
-    println!(
-        "  CPU Usage:    {}",
-        format_cpu_bar(metrics.cpu_usage)
-    );
+    println!("  CPU Usage:    {}", format_cpu_bar(metrics.cpu_usage));
     println!(
         "  Memory:       {} / {} ({})",
         style(format_bytes(metrics.memory_used)).white(),
@@ -283,11 +282,8 @@ pub async fn activity(config: &AppConfig, limit: usize, follow: bool) -> Result<
         let mut last_timestamp: Option<String> = None;
 
         loop {
-            let activity: ActivityLogResponse = agent_request(
-                &instance.ip,
-                config,
-                &format!("/activity?limit={}", limit)
-            ).await?;
+            let activity: ActivityLogResponse =
+                agent_request(&instance.ip, config, &format!("/activity?limit={}", limit)).await?;
 
             for entry in activity.entries.iter().rev() {
                 // Only print entries newer than what we've seen
@@ -306,11 +302,8 @@ pub async fn activity(config: &AppConfig, limit: usize, follow: bool) -> Result<
         }
     } else {
         // One-shot mode
-        let activity: ActivityLogResponse = agent_request(
-            &instance.ip,
-            config,
-            &format!("/activity?limit={}", limit)
-        ).await?;
+        let activity: ActivityLogResponse =
+            agent_request(&instance.ip, config, &format!("/activity?limit={}", limit)).await?;
 
         if activity.entries.is_empty() {
             println!("{}", style("No activity logged yet").dim());
@@ -334,11 +327,8 @@ pub async fn exec_log(config: &AppConfig, lines: usize) -> Result<()> {
         .get_active_instance()?
         .ok_or(SpuffError::NoActiveInstance)?;
 
-    let response: ExecLogResponse = agent_request(
-        &instance.ip,
-        config,
-        &format!("/exec-log?lines={}", lines)
-    ).await?;
+    let response: ExecLogResponse =
+        agent_request(&instance.ip, config, &format!("/exec-log?lines={}", lines)).await?;
 
     if response.entries.is_empty() {
         println!("{}", style("No exec commands logged yet").dim());
@@ -558,4 +548,3 @@ async fn agent_request<T: serde::de::DeserializeOwned>(
         ))
     })
 }
-

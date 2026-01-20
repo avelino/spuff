@@ -75,13 +75,19 @@ pub async fn run_progress_ui(
 
     // Now try to initialize TUI
     if let Err(e) = enable_raw_mode() {
-        eprintln!("Warning: Could not enable raw mode ({}), falling back to text progress", e);
+        eprintln!(
+            "Warning: Could not enable raw mode ({}), falling back to text progress",
+            e
+        );
         return run_text_progress(steps, rx).await;
     }
 
     if let Err(e) = execute!(stdout(), EnterAlternateScreen) {
         let _ = disable_raw_mode();
-        eprintln!("Warning: Could not enter alternate screen ({}), falling back to text progress", e);
+        eprintln!(
+            "Warning: Could not enter alternate screen ({}), falling back to text progress",
+            e
+        );
         return run_text_progress(steps, rx).await;
     }
 
@@ -91,7 +97,10 @@ pub async fn run_progress_ui(
         Err(e) => {
             let _ = disable_raw_mode();
             let _ = execute!(stdout(), LeaveAlternateScreen);
-            eprintln!("Warning: Could not create terminal ({}), falling back to text progress", e);
+            eprintln!(
+                "Warning: Could not create terminal ({}), falling back to text progress",
+                e
+            );
             return run_text_progress(steps, rx).await;
         }
     };
@@ -222,11 +231,11 @@ fn draw_progress_ui(
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),  // Banner
-            Constraint::Length(1),  // Spacing
-            Constraint::Min(8),     // Progress steps
-            Constraint::Length(2),  // Detail/status
-            Constraint::Length(1),  // Hints
+            Constraint::Length(4), // Banner
+            Constraint::Length(1), // Spacing
+            Constraint::Min(8),    // Progress steps
+            Constraint::Length(2), // Detail/status
+            Constraint::Length(1), // Hints
         ])
         .split(centered);
 
@@ -274,8 +283,6 @@ fn draw_progress_ui(
         // Main step line
         let style = if step.state == StepState::InProgress {
             Style::default().fg(colors::TEXT)
-        } else if step.state == StepState::Done {
-            Style::default().fg(colors::MUTED)
         } else {
             Style::default().fg(colors::MUTED)
         };
@@ -333,7 +340,10 @@ fn draw_progress_ui(
     if !detail.is_empty() && !is_complete && !is_failed {
         let detail_line = Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(detail.to_string(), Style::default().fg(colors::MUTED).italic()),
+            Span::styled(
+                detail.to_string(),
+                Style::default().fg(colors::MUTED).italic(),
+            ),
         ]);
         frame.render_widget(Paragraph::new(detail_line), layout[3]);
     }
@@ -370,26 +380,24 @@ async fn run_text_progress(
 
     loop {
         match rx.recv().await {
-            Some(ProgressMessage::SetStep(idx, state)) => {
-                match state {
-                    StepState::InProgress => {
-                        if idx < steps.len() {
-                            println!("  {} {}", style("→").cyan(), style(&steps[idx]).white());
-                        }
+            Some(ProgressMessage::SetStep(idx, state)) => match state {
+                StepState::InProgress => {
+                    if idx < steps.len() {
+                        println!("  {} {}", style("→").cyan(), style(&steps[idx]).white());
                     }
-                    StepState::Done => {
-                        if idx < steps.len() {
-                            println!("  {} {}", style("✓").green(), style(&steps[idx]).dim());
-                        }
-                    }
-                    StepState::Failed => {
-                        if idx < steps.len() {
-                            println!("  {} {}", style("✕").red(), style(&steps[idx]).red());
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                StepState::Done => {
+                    if idx < steps.len() {
+                        println!("  {} {}", style("✓").green(), style(&steps[idx]).dim());
+                    }
+                }
+                StepState::Failed => {
+                    if idx < steps.len() {
+                        println!("  {} {}", style("✕").red(), style(&steps[idx]).red());
+                    }
+                }
+                _ => {}
+            },
             Some(ProgressMessage::SetDetail(detail)) => {
                 if !detail.is_empty() {
                     println!("    {}", style(&detail).dim().italic());
@@ -406,7 +414,12 @@ async fn run_text_progress(
             Some(ProgressMessage::Complete(name, ip)) => {
                 result = Some((name.clone(), ip.clone()));
                 println!();
-                println!("  {} {} ({})", style("✓").green().bold(), style(&name).white().bold(), style(&ip).dim());
+                println!(
+                    "  {} {} ({})",
+                    style("✓").green().bold(),
+                    style(&name).white().bold(),
+                    style(&ip).dim()
+                );
             }
             Some(ProgressMessage::Failed(msg)) => {
                 println!();

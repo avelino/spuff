@@ -75,15 +75,31 @@ fn print_tunnel_info(ports: &[u16]) {
         return;
     }
 
-    println!("  {}", style("╭──────────────────────────────────────────────────────────╮").dim());
-    println!("  {}  {:<56} {}", style("│").dim(), style("SSH Tunnels (from spuff.yaml)").cyan(), style("│").dim());
+    println!(
+        "  {}",
+        style("╭──────────────────────────────────────────────────────────╮").dim()
+    );
+    println!(
+        "  {}  {:<56} {}",
+        style("│").dim(),
+        style("SSH Tunnels (from spuff.yaml)").cyan(),
+        style("│").dim()
+    );
 
     for port in ports {
         let tunnel_str = format!("localhost:{} → vm:{}", port, port);
-        println!("  {}  {:<56} {}", style("│").dim(), tunnel_str, style("│").dim());
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            tunnel_str,
+            style("│").dim()
+        );
     }
 
-    println!("  {}", style("╰──────────────────────────────────────────────────────────╯").dim());
+    println!(
+        "  {}",
+        style("╰──────────────────────────────────────────────────────────╯").dim()
+    );
     println!();
 }
 
@@ -179,10 +195,7 @@ pub async fn tunnel(config: &AppConfig, specific_port: Option<u16>, stop: bool) 
     let _ = std::fs::remove_file(get_tunnel_state_file()?);
 
     println!();
-    println!(
-        "  {} Tunnels stopped.",
-        style("✓").green().bold()
-    );
+    println!("  {} Tunnels stopped.", style("✓").green().bold());
 
     Ok(())
 }
@@ -192,10 +205,7 @@ async fn stop_tunnels() -> Result<()> {
     let state_file = get_tunnel_state_file()?;
 
     if !state_file.exists() {
-        println!(
-            "  {} No active tunnel state found.",
-            style("○").dim()
-        );
+        println!("  {} No active tunnel state found.", style("○").dim());
         println!(
             "  {} If tunnels are running in another terminal, press Ctrl+C there.",
             style("i").blue()

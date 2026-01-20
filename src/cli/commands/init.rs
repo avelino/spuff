@@ -88,7 +88,10 @@ pub async fn execute() -> Result<()> {
         "Config file: {}",
         style(AppConfig::config_path()?.display()).dim()
     );
-    println!("\nRun {} to create your first environment.", style("spuff up").cyan());
+    println!(
+        "\nRun {} to create your first environment.",
+        style("spuff up").cyan()
+    );
 
     Ok(())
 }
@@ -110,12 +113,7 @@ fn get_regions_for_provider(provider: &str) -> Vec<&'static str> {
 
 fn get_sizes_for_provider(provider: &str) -> Vec<&'static str> {
     match provider {
-        "digitalocean" => vec![
-            "s-1vcpu-1gb",
-            "s-2vcpu-4gb",
-            "s-4vcpu-8gb",
-            "s-8vcpu-16gb",
-        ],
+        "digitalocean" => vec!["s-1vcpu-1gb", "s-2vcpu-4gb", "s-4vcpu-8gb", "s-8vcpu-16gb"],
         "hetzner" => vec!["cx22", "cx32", "cx42", "cx52"],
         "aws" => vec!["t3.small", "t3.medium", "t3.large", "t3.xlarge"],
         _ => vec!["default"],

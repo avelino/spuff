@@ -91,7 +91,8 @@ impl SshClient {
                      This may be due to RSA SHA2 algorithm negotiation issues.\n\
                      Spuff uses its own ed25519 key for authentication.\n\n\
                      If this is a new instance, try: spuff down && spuff up\n\
-                     This will re-provision with the spuff managed key.".to_string()
+                     This will re-provision with the spuff managed key."
+                        .to_string(),
                 ));
             }
 
@@ -101,7 +102,8 @@ impl SshClient {
                  ssh-add {}\n\n\
                  On macOS with Keychain:\n\n  \
                  ssh-add --apple-use-keychain {}",
-                config.key_path.display(), config.key_path.display()
+                config.key_path.display(),
+                config.key_path.display()
             )));
         }
 

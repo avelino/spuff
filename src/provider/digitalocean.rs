@@ -41,7 +41,11 @@ impl DigitalOceanProvider {
     }
 
     /// Create a new provider with full configuration.
-    pub fn with_config(token: &str, base_url: &str, timeouts: ProviderTimeouts) -> ProviderResult<Self> {
+    pub fn with_config(
+        token: &str,
+        base_url: &str,
+        timeouts: ProviderTimeouts,
+    ) -> ProviderResult<Self> {
         if token.is_empty() {
             return Err(ProviderError::auth(
                 "digitalocean",
@@ -101,7 +105,11 @@ impl DigitalOceanProvider {
         }
 
         let data: SshKeysResponse = response.json().await?;
-        let keys: Vec<String> = data.ssh_keys.into_iter().map(|k| k.id.to_string()).collect();
+        let keys: Vec<String> = data
+            .ssh_keys
+            .into_iter()
+            .map(|k| k.id.to_string())
+            .collect();
 
         if keys.is_empty() {
             tracing::debug!("No SSH keys found in DigitalOcean account");
@@ -309,7 +317,10 @@ impl Provider for DigitalOceanProvider {
             tokio::time::sleep(delay).await;
         }
 
-        Err(ProviderError::timeout("wait for instance ready", start.elapsed()))
+        Err(ProviderError::timeout(
+            "wait for instance ready",
+            start.elapsed(),
+        ))
     }
 
     async fn create_snapshot(&self, instance_id: &str, name: &str) -> ProviderResult<Snapshot> {
@@ -327,7 +338,10 @@ impl Provider for DigitalOceanProvider {
 
         let response = self
             .client
-            .post(format!("{}/droplets/{}/actions", self.base_url, instance_id))
+            .post(format!(
+                "{}/droplets/{}/actions",
+                self.base_url, instance_id
+            ))
             .header("Authorization", self.auth_header())
             .header("Content-Type", "application/json")
             .json(&request)
@@ -351,9 +365,7 @@ impl Provider for DigitalOceanProvider {
         snapshots
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| {
-                ProviderError::not_found("snapshot", format!("name={}", name))
-            })
+            .ok_or_else(|| ProviderError::not_found("snapshot", format!("name={}", name)))
     }
 
     async fn list_snapshots(&self) -> ProviderResult<Vec<Snapshot>> {
@@ -519,7 +531,9 @@ struct SshKeyData {
 
 impl DropletData {
     fn to_provider_instance(&self) -> ProviderInstance {
-        let ip = self.get_public_ip().unwrap_or_else(|| "0.0.0.0".parse().unwrap());
+        let ip = self
+            .get_public_ip()
+            .unwrap_or_else(|| "0.0.0.0".parse().unwrap());
 
         let created_at = DateTime::parse_from_rfc3339(&self.created_at)
             .map(|dt| dt.with_timezone(&Utc))
@@ -625,7 +639,10 @@ mod tests {
             ("active", InstanceStatus::Active),
             ("off", InstanceStatus::Off),
             ("archive", InstanceStatus::Archive),
-            ("unknown_status", InstanceStatus::Unknown("unknown_status".to_string())),
+            (
+                "unknown_status",
+                InstanceStatus::Unknown("unknown_status".to_string()),
+            ),
         ];
 
         for (status_str, expected_status) in test_cases {
@@ -705,7 +722,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let request = InstanceRequest::new("test-instance", "nyc1", "s-2vcpu-4gb")
             .with_image(ImageSpec::ubuntu("24.04"))
             .with_label("spuff", "true");
@@ -736,12 +754,16 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("bad-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("bad-token", &mock_server.uri()).unwrap();
         let request = InstanceRequest::new("test", "nyc1", "s-1vcpu-1gb");
 
         let result = provider.create_instance(&request).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ProviderError::Authentication { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::Authentication { .. }
+        ));
     }
 
     #[tokio::test]
@@ -764,7 +786,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_instance("12345").await;
 
         assert!(result.is_ok());
@@ -787,7 +810,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_instance("99999").await;
 
         assert!(result.is_ok());
@@ -805,7 +829,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.destroy_instance("11111").await;
 
         assert!(result.is_ok());
@@ -821,7 +846,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.destroy_instance("22222").await;
 
         assert!(result.is_ok());
@@ -853,7 +879,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.list_instances().await;
 
         assert!(result.is_ok());
@@ -895,7 +922,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.list_snapshots().await;
 
         assert!(result.is_ok());
@@ -915,7 +943,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.delete_snapshot("snap-123").await;
 
         assert!(result.is_ok());
@@ -938,7 +967,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_ssh_key_ids().await;
 
         assert!(result.is_ok());
@@ -959,7 +989,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_ssh_key_ids().await;
 
         assert!(result.is_ok());
@@ -976,7 +1007,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let provider = DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
+        let provider =
+            DigitalOceanProvider::with_base_url("test-token", &mock_server.uri()).unwrap();
         let result = provider.get_ssh_key_ids().await;
 
         assert!(result.is_ok());

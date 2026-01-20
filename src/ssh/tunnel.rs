@@ -52,11 +52,8 @@ pub async fn create_local_forward(
     let task = tokio::spawn(async move {
         while running_clone.load(Ordering::SeqCst) {
             // Accept connections with timeout for shutdown check
-            let accept_result = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                listener.accept(),
-            )
-            .await;
+            let accept_result =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await;
 
             let (mut local_stream, peer_addr) = match accept_result {
                 Ok(Ok(conn)) => conn,
@@ -104,7 +101,8 @@ pub async fn create_local_forward(
                     Ok((to_remote, from_remote)) => {
                         tracing::debug!(
                             "Tunnel: connection closed. Sent {} bytes, received {} bytes",
-                            to_remote, from_remote
+                            to_remote,
+                            from_remote
                         );
                     }
                     Err(e) => {

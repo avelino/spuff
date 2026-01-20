@@ -8,10 +8,7 @@ pub async fn show() -> Result<()> {
 
     if !config_path.exists() {
         println!("{}", style("No configuration found.").dim());
-        println!(
-            "Run {} to create one.",
-            style("spuff init").cyan()
-        );
+        println!("Run {} to create one.", style("spuff init").cyan());
         return Ok(());
     }
 
@@ -39,10 +36,7 @@ pub async fn show() -> Result<()> {
         }
     );
     println!();
-    println!(
-        "Config file: {}",
-        style(config_path.display()).dim()
-    );
+    println!("Config file: {}", style(config_path.display()).dim());
 
     Ok(())
 }
@@ -90,10 +84,7 @@ pub async fn edit() -> Result<()> {
 
     if !config_path.exists() {
         println!("{}", style("No configuration found.").dim());
-        println!(
-            "Run {} to create one.",
-            style("spuff init").cyan()
-        );
+        println!("Run {} to create one.", style("spuff init").cyan());
         return Ok(());
     }
 

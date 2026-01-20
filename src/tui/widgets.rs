@@ -90,11 +90,17 @@ pub fn render_instance_card(frame: &mut Frame, area: Rect, info: &InstanceInfo) 
 
     let lines = vec![
         Line::from(vec![
-            Span::styled(info.status.symbol(), Style::default().fg(info.status.color())),
+            Span::styled(
+                info.status.symbol(),
+                Style::default().fg(info.status.color()),
+            ),
             Span::raw(" "),
             Span::styled(&info.name, Style::default().fg(colors::TEXT).bold()),
             Span::raw(" "),
-            Span::styled(format!("({})", &info.ip), Style::default().fg(colors::MUTED)),
+            Span::styled(
+                format!("({})", &info.ip),
+                Style::default().fg(colors::MUTED),
+            ),
         ]),
         Line::raw(""),
         Line::from(vec![
@@ -198,7 +204,6 @@ impl StepState {
     }
 }
 
-
 /// Create a centered layout with max width
 pub fn centered_rect(max_width: u16, height: u16, area: Rect) -> Rect {
     let width = max_width.min(area.width.saturating_sub(4));
@@ -213,9 +218,9 @@ pub fn main_layout(area: Rect) -> (Rect, Rect, Rect) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Banner
-            Constraint::Min(8),     // Content
-            Constraint::Length(1),  // Hints
+            Constraint::Length(5), // Banner
+            Constraint::Min(8),    // Content
+            Constraint::Length(1), // Hints
         ])
         .split(area);
 

@@ -36,9 +36,8 @@ pub fn generate_managed_key() -> Result<PathBuf> {
 
     // Create parent directory
     if let Some(parent) = key_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            SpuffError::Ssh(format!("Failed to create config directory: {}", e))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SpuffError::Ssh(format!("Failed to create config directory: {}", e)))?;
     }
 
     // Generate ed25519 key
@@ -50,9 +49,8 @@ pub fn generate_managed_key() -> Result<PathBuf> {
         .to_openssh(LineEnding::LF)
         .map_err(|e| SpuffError::Ssh(format!("Failed to encode private key: {}", e)))?;
 
-    std::fs::write(&key_path, private_openssh.as_bytes()).map_err(|e| {
-        SpuffError::Ssh(format!("Failed to write private key: {}", e))
-    })?;
+    std::fs::write(&key_path, private_openssh.as_bytes())
+        .map_err(|e| SpuffError::Ssh(format!("Failed to write private key: {}", e)))?;
 
     // Set permissions (Unix only)
     #[cfg(unix)]
@@ -69,9 +67,8 @@ pub fn generate_managed_key() -> Result<PathBuf> {
         .map_err(|e| SpuffError::Ssh(format!("Failed to encode public key: {}", e)))?;
 
     let pub_key_path = format!("{}.pub", key_path.display());
-    std::fs::write(&pub_key_path, format!("{}\n", public_openssh)).map_err(|e| {
-        SpuffError::Ssh(format!("Failed to write public key: {}", e))
-    })?;
+    std::fs::write(&pub_key_path, format!("{}\n", public_openssh))
+        .map_err(|e| SpuffError::Ssh(format!("Failed to write public key: {}", e)))?;
 
     tracing::info!("Generated new spuff SSH key at {}", key_path.display());
 
@@ -108,7 +105,6 @@ pub fn get_managed_public_key() -> Result<String> {
         .map_err(|e| SpuffError::Ssh(format!("Failed to read managed public key: {}", e)))
         .map(|s| s.trim().to_string())
 }
-
 
 #[cfg(test)]
 mod tests {
