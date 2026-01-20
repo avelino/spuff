@@ -206,11 +206,17 @@ mod tests {
     #[test]
     fn test_devtools_config_serde_defaults() {
         let config: DevToolsConfig = serde_json::from_str("{}").unwrap();
-        assert!(config.claude_code, "claude_code should default to true via serde");
+        assert!(
+            config.claude_code,
+            "claude_code should default to true via serde"
+        );
         assert!(config.codex, "codex should default to true via serde");
         assert!(config.opencode, "opencode should default to true via serde");
         assert!(config.docker, "docker should default to true via serde");
-        assert!(config.shell_tools, "shell_tools should default to true via serde");
+        assert!(
+            config.shell_tools,
+            "shell_tools should default to true via serde"
+        );
         assert!(config.nodejs, "nodejs should default to true via serde");
     }
 

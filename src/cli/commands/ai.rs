@@ -13,11 +13,7 @@ const AI_TOOLS: &[(&str, &str, &str)] = &[
         "Anthropic's Claude Code CLI",
         "npm install -g @anthropic-ai/claude-code",
     ),
-    (
-        "codex",
-        "OpenAI Codex CLI",
-        "npm install -g @openai/codex",
-    ),
+    ("codex", "OpenAI Codex CLI", "npm install -g @openai/codex"),
     (
         "opencode",
         "Open-source AI coding assistant",
@@ -107,25 +103,28 @@ pub async fn status(config: &AppConfig) -> Result<()> {
     println!();
 
     for (name, _, _) in AI_TOOLS {
-        let (status_text, status_style): (String, fn(String) -> _) = if let Some(tool) =
-            state.tools.get(*name)
-        {
-            match tool.status.as_str() {
-                "installed" => ("installed".to_string(), |s| style(s).green()),
-                "installing" => ("installing".to_string(), |s| style(s).yellow()),
-                "failed" => {
-                    let msg = tool.error.as_deref().unwrap_or("unknown error");
-                    (format!("failed: {}", msg), |s| style(s).red())
+        let (status_text, status_style): (String, fn(String) -> _) =
+            if let Some(tool) = state.tools.get(*name) {
+                match tool.status.as_str() {
+                    "installed" => ("installed".to_string(), |s| style(s).green()),
+                    "installing" => ("installing".to_string(), |s| style(s).yellow()),
+                    "failed" => {
+                        let msg = tool.error.as_deref().unwrap_or("unknown error");
+                        (format!("failed: {}", msg), |s| style(s).red())
+                    }
+                    "skipped" => ("skipped".to_string(), |s| style(s).dim()),
+                    "pending" => ("pending".to_string(), |s| style(s).dim()),
+                    _ => (tool.status.clone(), |s| style(s).white()),
                 }
-                "skipped" => ("skipped".to_string(), |s| style(s).dim()),
-                "pending" => ("pending".to_string(), |s| style(s).dim()),
-                _ => (tool.status.clone(), |s| style(s).white()),
-            }
-        } else {
-            ("not configured".to_string(), |s| style(s).dim())
-        };
+            } else {
+                ("not configured".to_string(), |s| style(s).dim())
+            };
 
-        println!("  {:<15} {}", style(*name).white(), status_style(status_text));
+        println!(
+            "  {:<15} {}",
+            style(*name).white(),
+            status_style(status_text)
+        );
     }
 
     Ok(())

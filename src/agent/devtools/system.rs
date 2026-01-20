@@ -18,7 +18,8 @@ impl<'a> SystemInstaller<'a> {
         let username = self.installer.username.clone();
 
         tokio::spawn(async move {
-            let installer = DevToolsInstaller::new(state, username.clone(), DevToolsConfig::default());
+            let installer =
+                DevToolsInstaller::new(state, username.clone(), DevToolsConfig::default());
 
             installer
                 .update_status("docker", ToolStatus::Installing, None)
@@ -74,7 +75,8 @@ impl<'a> SystemInstaller<'a> {
         let username = self.installer.username.clone();
 
         tokio::spawn(async move {
-            let installer = DevToolsInstaller::new(state, username.clone(), DevToolsConfig::default());
+            let installer =
+                DevToolsInstaller::new(state, username.clone(), DevToolsConfig::default());
 
             installer
                 .update_status("fzf", ToolStatus::Installing, None)
@@ -107,8 +109,7 @@ impl<'a> SystemInstaller<'a> {
         let state = self.installer.state.clone();
 
         tokio::spawn(async move {
-            let installer =
-                DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
+            let installer = DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
 
             installer
                 .update_status("bat", ToolStatus::Installing, None)
@@ -147,8 +148,7 @@ impl<'a> SystemInstaller<'a> {
         let state = self.installer.state.clone();
 
         tokio::spawn(async move {
-            let installer =
-                DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
+            let installer = DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
 
             installer
                 .update_status("eza", ToolStatus::Installing, None)
@@ -194,8 +194,7 @@ impl<'a> SystemInstaller<'a> {
         let state = self.installer.state.clone();
 
         tokio::spawn(async move {
-            let installer =
-                DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
+            let installer = DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
 
             installer
                 .update_status("zoxide", ToolStatus::Installing, None)
@@ -231,8 +230,7 @@ impl<'a> SystemInstaller<'a> {
         let state = self.installer.state.clone();
 
         tokio::spawn(async move {
-            let installer =
-                DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
+            let installer = DevToolsInstaller::new(state, String::new(), DevToolsConfig::default());
 
             installer
                 .update_status("starship", ToolStatus::Installing, None)

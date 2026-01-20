@@ -16,7 +16,11 @@ pub struct DevToolsInstaller {
 }
 
 impl DevToolsInstaller {
-    pub fn new(state: Arc<RwLock<DevToolsState>>, username: String, config: DevToolsConfig) -> Self {
+    pub fn new(
+        state: Arc<RwLock<DevToolsState>>,
+        username: String,
+        config: DevToolsConfig,
+    ) -> Self {
         Self {
             state,
             username,
