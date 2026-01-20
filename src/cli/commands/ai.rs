@@ -21,16 +21,30 @@ const AI_TOOLS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Response from agent's /devtools endpoint
 #[derive(Debug, Deserialize)]
-struct DevToolState {
-    tools: std::collections::HashMap<String, ToolStatus>,
+struct DevToolsResponse {
+    tools: Vec<DevTool>,
 }
 
+/// A single devtool from the agent response
 #[derive(Debug, Deserialize)]
-struct ToolStatus {
-    status: String,
+struct DevTool {
+    id: String,
+    status: ToolStatus,
     #[serde(default)]
-    error: Option<String>,
+    version: Option<String>,
+}
+
+/// Status of a single devtool installation (matches agent's ToolStatus enum)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ToolStatus {
+    Pending,
+    Installing,
+    Done,
+    Failed(String),
+    Skipped,
 }
 
 /// List available AI coding tools
@@ -84,6 +98,14 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
+/// Map CLI tool names to agent tool IDs
+fn cli_to_agent_id(cli_name: &str) -> &str {
+    match cli_name {
+        "claude-code" => "claude_code",
+        other => other,
+    }
+}
+
 /// Show AI tools installation status on remote environment
 pub async fn status(config: &AppConfig) -> Result<()> {
     let db = StateDb::open()?;
@@ -97,24 +119,32 @@ pub async fn status(config: &AppConfig) -> Result<()> {
         style(&instance.name).cyan()
     );
 
-    let state: DevToolState = agent_request(&instance.ip, config, "/devtools").await?;
+    let response: DevToolsResponse = agent_request(&instance.ip, config, "/devtools").await?;
+
+    // Build a map from tool id to tool for quick lookup
+    let tools_map: std::collections::HashMap<&str, &DevTool> =
+        response.tools.iter().map(|t| (t.id.as_str(), t)).collect();
 
     println!("{}", style("AI Tools Status").bold().cyan());
     println!();
 
     for (name, _, _) in AI_TOOLS {
+        let agent_id = cli_to_agent_id(name);
         let (status_text, status_style): (String, fn(String) -> _) =
-            if let Some(tool) = state.tools.get(*name) {
-                match tool.status.as_str() {
-                    "installed" => ("installed".to_string(), |s| style(s).green()),
-                    "installing" => ("installing".to_string(), |s| style(s).yellow()),
-                    "failed" => {
-                        let msg = tool.error.as_deref().unwrap_or("unknown error");
-                        (format!("failed: {}", msg), |s| style(s).red())
+            if let Some(tool) = tools_map.get(agent_id) {
+                match &tool.status {
+                    ToolStatus::Done => {
+                        let version_info = tool
+                            .version
+                            .as_ref()
+                            .map(|v| format!(" ({})", v))
+                            .unwrap_or_default();
+                        (format!("installed{}", version_info), |s| style(s).green())
                     }
-                    "skipped" => ("skipped".to_string(), |s| style(s).dim()),
-                    "pending" => ("pending".to_string(), |s| style(s).dim()),
-                    _ => (tool.status.clone(), |s| style(s).white()),
+                    ToolStatus::Installing => ("installing".to_string(), |s| style(s).yellow()),
+                    ToolStatus::Failed(msg) => (format!("failed: {}", msg), |s| style(s).red()),
+                    ToolStatus::Skipped => ("skipped".to_string(), |s| style(s).dim()),
+                    ToolStatus::Pending => ("pending".to_string(), |s| style(s).dim()),
                 }
             } else {
                 ("not configured".to_string(), |s| style(s).dim())
@@ -155,10 +185,17 @@ pub async fn install(config: &AppConfig, tool: String) -> Result<()> {
     );
 
     // Build config with only the requested tool enabled
+    // Explicitly disable non-AI devtools to prevent reinstallation (serde defaults are true)
     let config_json = match tool.as_str() {
-        "claude-code" => r#"{"claude_code":true,"codex":false,"opencode":false}"#,
-        "codex" => r#"{"claude_code":false,"codex":true,"opencode":false}"#,
-        "opencode" => r#"{"claude_code":false,"codex":false,"opencode":true}"#,
+        "claude-code" => {
+            r#"{"claude_code":true,"codex":false,"opencode":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+        }
+        "codex" => {
+            r#"{"claude_code":false,"codex":true,"opencode":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+        }
+        "opencode" => {
+            r#"{"claude_code":false,"codex":false,"opencode":true,"docker":false,"shell_tools":false,"nodejs":false}"#
+        }
         _ => unreachable!(),
     };
 

@@ -25,6 +25,17 @@ const STEP_BOOTSTRAP: usize = 4;
 const SUB_PACKAGES: usize = 0;
 const SUB_AGENT: usize = 1;
 
+/// Parameters for instance provisioning
+struct ProvisionParams {
+    config: AppConfig,
+    size: Option<String>,
+    snapshot: Option<String>,
+    region: Option<String>,
+    project_config: Option<ProjectConfig>,
+    cli_ai_tools: Option<AiToolsConfig>,
+    dev: bool,
+}
+
 pub async fn execute(
     config: &AppConfig,
     size: Option<String>,
@@ -162,27 +173,18 @@ pub async fn execute(
     }
 
     // Clone config values for the async task
-    let config_clone = config.clone();
-    let region_clone = effective_region.clone();
-    let size_clone = effective_size.clone();
-    let snapshot_clone = snapshot.clone();
-    let project_config_clone = project_config.clone();
-    let ai_tools_clone = cli_ai_tools.clone();
+    let params = ProvisionParams {
+        config: config.clone(),
+        size: effective_size.clone(),
+        snapshot: snapshot.clone(),
+        region: effective_region.clone(),
+        project_config: project_config.clone(),
+        cli_ai_tools: cli_ai_tools.clone(),
+        dev,
+    };
 
     // Spawn the provisioning task
-    let provision_task = tokio::spawn(async move {
-        provision_instance(
-            &config_clone,
-            size_clone,
-            snapshot_clone,
-            region_clone,
-            project_config_clone,
-            ai_tools_clone,
-            dev,
-            tx,
-        )
-        .await
-    });
+    let provision_task = tokio::spawn(async move { provision_instance(params, tx).await });
 
     // Run the TUI
     let tui_result = run_progress_ui(steps, rx).await;
@@ -503,17 +505,11 @@ fn print_project_summary(project_config: &ProjectConfig) {
 }
 
 async fn provision_instance(
-    config: &AppConfig,
-    size: Option<String>,
-    snapshot: Option<String>,
-    region: Option<String>,
-    project_config: Option<ProjectConfig>,
-    cli_ai_tools: Option<AiToolsConfig>,
-    dev: bool,
+    params: ProvisionParams,
     tx: mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
     let db = StateDb::open()?;
-    let provider = create_provider(config)?;
+    let provider = create_provider(&params.config)?;
 
     // Step 1: Generate cloud-init
     tx.send(ProgressMessage::SetStep(
@@ -528,8 +524,11 @@ async fn provision_instance(
     .await
     .ok();
 
-    let user_data =
-        generate_cloud_init_with_ai_tools(config, project_config.as_ref(), cli_ai_tools.as_ref())?;
+    let user_data = generate_cloud_init_with_ai_tools(
+        &params.config,
+        params.project_config.as_ref(),
+        params.cli_ai_tools.as_ref(),
+    )?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();
@@ -545,9 +544,11 @@ async fn provision_instance(
     .ok();
 
     let instance_name = generate_instance_name();
-    let instance_region = region.unwrap_or_else(|| config.region.clone());
-    let instance_size = size.unwrap_or_else(|| config.size.clone());
-    let image = get_image_spec(&config.provider, snapshot);
+    let instance_region = params
+        .region
+        .unwrap_or_else(|| params.config.region.clone());
+    let instance_size = params.size.unwrap_or_else(|| params.config.size.clone());
+    let image = get_image_spec(&params.config.provider, params.snapshot);
 
     let request = InstanceRequest::new(
         instance_name.clone(),
@@ -602,7 +603,7 @@ async fn provision_instance(
     let local_instance = LocalInstance::from_provider(
         &instance,
         instance_name.clone(),
-        config.provider.clone(),
+        params.config.provider.clone(),
         instance_region.clone(),
         instance_size.clone(),
     );
@@ -638,13 +639,17 @@ async fn provision_instance(
     // Then wait for user to exist and SSH login to work
     tx.send(ProgressMessage::SetDetail(format!(
         "Waiting for user {}...",
-        config.ssh_user
+        params.config.ssh_user
     )))
     .await
     .ok();
 
-    if let Err(e) =
-        wait_for_ssh_login(&instance.ip.to_string(), config, Duration::from_secs(120)).await
+    if let Err(e) = wait_for_ssh_login(
+        &instance.ip.to_string(),
+        &params.config,
+        Duration::from_secs(120),
+    )
+    .await
     {
         tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
             .await
@@ -658,7 +663,7 @@ async fn provision_instance(
         .ok();
 
     // In dev mode, upload local agent binary
-    if dev {
+    if params.dev {
         tx.send(ProgressMessage::SetStep(
             STEP_UPLOAD_AGENT,
             StepState::InProgress,
@@ -675,7 +680,7 @@ async fn provision_instance(
         let ip_str = instance.ip.to_string();
 
         // Upload the binary
-        if let Err(e) = upload_local_agent(&ip_str, config, &agent_path).await {
+        if let Err(e) = upload_local_agent(&ip_str, &params.config, &agent_path).await {
             tx.send(ProgressMessage::SetStep(
                 STEP_UPLOAD_AGENT,
                 StepState::Failed,
@@ -716,7 +721,9 @@ async fn provision_instance(
         .ok();
 
     // Wait for cloud-init with progress tracking
-    if let Err(e) = wait_for_cloud_init_with_progress(&instance.ip.to_string(), config, &tx).await {
+    if let Err(e) =
+        wait_for_cloud_init_with_progress(&instance.ip.to_string(), &params.config, &tx).await
+    {
         tracing::warn!("Cloud-init wait failed: {}", e);
         // Don't fail the whole process, just warn
     }
@@ -732,7 +739,7 @@ async fn provision_instance(
     .await
     .ok();
 
-    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), config).await {
+    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), &params.config).await {
         tracing::warn!("Failed to trigger devtools installation: {}", e);
         // Don't fail - user can trigger manually with `spuff agent devtools install`
     }
