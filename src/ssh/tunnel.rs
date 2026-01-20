@@ -124,6 +124,8 @@ pub async fn create_local_forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     #[tokio::test]
     async fn test_port_forward_stop() {
@@ -136,5 +138,68 @@ mod tests {
         assert!(running.load(Ordering::SeqCst));
         forward.stop().await;
         assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_port_forward_stop_aborts_task() {
+        let running = Arc::new(AtomicBool::new(true));
+        let task = tokio::spawn(async {
+            // Simulate long-running task
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let forward = PortForward {
+            running: running.clone(),
+            task: Arc::new(Mutex::new(Some(task))),
+        };
+
+        forward.stop().await;
+
+        // Task should be aborted and removed
+        let task_guard = forward.task.lock().await;
+        assert!(task_guard.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_listener_binds_to_port() {
+        // Test that we can bind to a random port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port > 0);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_bidirectional_copy() {
+        // Create a simple echo server
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Spawn echo server
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        socket.write_all(&buf[..n]).await.unwrap();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Connect and test echo
+        let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+
+        let test_data = b"hello tunnel";
+        client.write_all(test_data).await.unwrap();
+
+        let mut response = vec![0u8; test_data.len()];
+        client.read_exact(&mut response).await.unwrap();
+
+        assert_eq!(&response, test_data);
     }
 }
