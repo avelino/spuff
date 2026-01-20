@@ -79,6 +79,7 @@ pub async fn execute() -> Result<()> {
         tailscale_enabled: false,
         tailscale_authkey: None,
         agent_token: None, // Can be set via SPUFF_AGENT_TOKEN env var
+        ai_tools: None,    // None means use default (all)
     };
 
     config.save()?;

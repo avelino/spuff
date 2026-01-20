@@ -7,9 +7,9 @@ use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
 use crate::connector::ssh::{wait_for_ssh, wait_for_ssh_login};
-use crate::environment::cloud_init::generate_cloud_init;
+use crate::environment::cloud_init::generate_cloud_init_with_ai_tools;
 use crate::error::{Result, SpuffError};
-use crate::project_config::ProjectConfig;
+use crate::project_config::{AiToolsConfig, ProjectConfig};
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
 use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase};
 use crate::state::{LocalInstance, StateDb};
@@ -32,6 +32,7 @@ pub async fn execute(
     region: Option<String>,
     no_connect: bool,
     dev: bool,
+    ai_tools: Option<String>,
 ) -> Result<()> {
     let db = StateDb::open()?;
 
@@ -64,6 +65,54 @@ pub async fn execute(
             .as_ref()
             .and_then(|p| p.resources.region.clone())
     });
+
+    // Process AI tools configuration
+    // Priority: CLI > Project config > Global config > Default (all)
+    let cli_ai_tools = match ai_tools.as_deref() {
+        Some("ask") => {
+            // Interactive mode - prompt user to select AI tools
+            println!(
+                "{} Select AI coding tools to install:",
+                style("?").cyan().bold()
+            );
+            println!("  1. {} (Anthropic)", style("claude-code").cyan());
+            println!("  2. {} (OpenAI)", style("codex").cyan());
+            println!("  3. {} (open source)", style("opencode").cyan());
+            println!("  a. {} - install all", style("all").green());
+            println!("  n. {} - install none", style("none").yellow());
+            println!();
+            print!("Enter your choice (comma-separated numbers, 'all', or 'none'): ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            let input = input.trim().to_lowercase();
+
+            Some(match input.as_str() {
+                "a" | "all" => AiToolsConfig::All,
+                "n" | "none" => AiToolsConfig::None,
+                _ => {
+                    let tools: Vec<String> = input
+                        .split(',')
+                        .filter_map(|s| match s.trim() {
+                            "1" | "claude-code" => Some("claude-code".to_string()),
+                            "2" | "codex" => Some("codex".to_string()),
+                            "3" | "opencode" => Some("opencode".to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if tools.is_empty() {
+                        AiToolsConfig::All
+                    } else {
+                        AiToolsConfig::List(tools)
+                    }
+                }
+            })
+        }
+        Some(arg) => Some(AiToolsConfig::from_cli_arg(arg)),
+        None => None, // Will use project/global config defaults
+    };
 
     // Pre-flight check: verify SSH key is usable
     verify_ssh_key_accessible(config).await?;
@@ -118,6 +167,7 @@ pub async fn execute(
     let size_clone = effective_size.clone();
     let snapshot_clone = snapshot.clone();
     let project_config_clone = project_config.clone();
+    let ai_tools_clone = cli_ai_tools.clone();
 
     // Spawn the provisioning task
     let provision_task = tokio::spawn(async move {
@@ -127,6 +177,7 @@ pub async fn execute(
             snapshot_clone,
             region_clone,
             project_config_clone,
+            ai_tools_clone,
             dev,
             tx,
         )
@@ -420,6 +471,30 @@ fn print_project_summary(project_config: &ProjectConfig) {
         );
     }
 
+    // Show AI tools config if not default (all)
+    match &project_config.ai_tools {
+        AiToolsConfig::None => {
+            println!(
+                "  {}  {:<56} {}",
+                style("│").dim(),
+                format!("AI tools: {}", style("none").yellow()),
+                style("│").dim()
+            );
+        }
+        AiToolsConfig::List(tools) => {
+            let tools_str = tools.join(", ");
+            println!(
+                "  {}  {:<56} {}",
+                style("│").dim(),
+                format!("AI tools: {}", tools_str),
+                style("│").dim()
+            );
+        }
+        AiToolsConfig::All => {
+            // Default - don't print anything
+        }
+    }
+
     println!(
         "  {}",
         style("╰──────────────────────────────────────────────────────────╯").dim()
@@ -433,6 +508,7 @@ async fn provision_instance(
     snapshot: Option<String>,
     region: Option<String>,
     project_config: Option<ProjectConfig>,
+    cli_ai_tools: Option<AiToolsConfig>,
     dev: bool,
     tx: mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
@@ -452,7 +528,8 @@ async fn provision_instance(
     .await
     .ok();
 
-    let user_data = generate_cloud_init(config, project_config.as_ref())?;
+    let user_data =
+        generate_cloud_init_with_ai_tools(config, project_config.as_ref(), cli_ai_tools.as_ref())?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();

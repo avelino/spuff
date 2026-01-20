@@ -56,6 +56,115 @@ pub struct ProjectConfig {
     /// Lifecycle hooks
     #[serde(default)]
     pub hooks: HooksConfig,
+
+    /// AI coding tools to install (claude-code, codex, opencode)
+    /// Can be a list of tools, "all", or "none"
+    #[serde(default)]
+    pub ai_tools: AiToolsConfig,
+}
+
+/// AI tools configuration
+/// Supports: list of specific tools, "all", or "none"
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AiToolsConfig {
+    /// Install all AI tools (default)
+    #[default]
+    All,
+    /// Don't install any AI tools
+    None,
+    /// Install specific tools
+    List(Vec<String>),
+}
+
+impl Serialize for AiToolsConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            AiToolsConfig::All => serializer.serialize_str("all"),
+            AiToolsConfig::None => serializer.serialize_str("none"),
+            AiToolsConfig::List(tools) => tools.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AiToolsConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct AiToolsConfigVisitor;
+
+        impl<'de> Visitor<'de> for AiToolsConfigVisitor {
+            type Value = AiToolsConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("'all', 'none', or a list of AI tool names")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<AiToolsConfig, E>
+            where
+                E: de::Error,
+            {
+                match value.to_lowercase().as_str() {
+                    "all" => Ok(AiToolsConfig::All),
+                    "none" => Ok(AiToolsConfig::None),
+                    _ => Err(de::Error::custom(format!(
+                        "invalid ai_tools value: '{}', expected 'all', 'none', or a list",
+                        value
+                    ))),
+                }
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<AiToolsConfig, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut tools = Vec::new();
+                while let Some(tool) = seq.next_element::<String>()? {
+                    tools.push(tool);
+                }
+                Ok(AiToolsConfig::List(tools))
+            }
+        }
+
+        deserializer.deserialize_any(AiToolsConfigVisitor)
+    }
+}
+
+impl AiToolsConfig {
+    /// Check if a specific tool should be installed
+    pub fn should_install(&self, tool: &str) -> bool {
+        match self {
+            AiToolsConfig::All => true,
+            AiToolsConfig::None => false,
+            AiToolsConfig::List(tools) => tools.iter().any(|t| t == tool),
+        }
+    }
+
+    /// Get list of tools to install
+    pub fn tools_to_install(&self) -> Vec<&str> {
+        match self {
+            AiToolsConfig::All => vec!["claude-code", "codex", "opencode"],
+            AiToolsConfig::None => vec![],
+            AiToolsConfig::List(tools) => tools.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+
+    /// Parse from CLI argument string (e.g., "claude-code,codex" or "all" or "none")
+    pub fn from_cli_arg(arg: &str) -> Self {
+        match arg.to_lowercase().as_str() {
+            "all" => AiToolsConfig::All,
+            "none" => AiToolsConfig::None,
+            _ => {
+                let tools: Vec<String> = arg.split(',').map(|s| s.trim().to_string()).collect();
+                AiToolsConfig::List(tools)
+            }
+        }
+    }
 }
 
 fn default_version() -> String {
@@ -159,6 +268,7 @@ impl Default for ProjectConfig {
             setup: Vec::new(),
             ports: Vec::new(),
             hooks: HooksConfig::default(),
+            ai_tools: AiToolsConfig::default(),
         }
     }
 }
@@ -536,5 +646,69 @@ hooks:
         assert!(config.bundles.is_empty());
         assert!(config.packages.is_empty());
         assert!(config.services.enabled);
+        assert_eq!(config.ai_tools, AiToolsConfig::All);
+    }
+
+    #[test]
+    fn test_ai_tools_config_all() {
+        let yaml = r#"
+ai_tools: all
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.ai_tools.should_install("claude-code"));
+        assert!(config.ai_tools.should_install("codex"));
+        assert!(config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_config_none() {
+        let yaml = r#"
+ai_tools: none
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.ai_tools.should_install("claude-code"));
+        assert!(!config.ai_tools.should_install("codex"));
+        assert!(!config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_config_list() {
+        let yaml = r#"
+ai_tools:
+  - claude-code
+  - opencode
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.ai_tools.should_install("claude-code"));
+        assert!(!config.ai_tools.should_install("codex"));
+        assert!(config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_from_cli_arg() {
+        assert_eq!(AiToolsConfig::from_cli_arg("all"), AiToolsConfig::All);
+        assert_eq!(AiToolsConfig::from_cli_arg("ALL"), AiToolsConfig::All);
+        assert_eq!(AiToolsConfig::from_cli_arg("none"), AiToolsConfig::None);
+        assert_eq!(AiToolsConfig::from_cli_arg("NONE"), AiToolsConfig::None);
+
+        let list = AiToolsConfig::from_cli_arg("claude-code,codex");
+        match list {
+            AiToolsConfig::List(tools) => {
+                assert_eq!(tools, vec!["claude-code", "codex"]);
+            }
+            _ => panic!("Expected List variant"),
+        }
+    }
+
+    #[test]
+    fn test_ai_tools_tools_to_install() {
+        assert_eq!(
+            AiToolsConfig::All.tools_to_install(),
+            vec!["claude-code", "codex", "opencode"]
+        );
+        assert!(AiToolsConfig::None.tools_to_install().is_empty());
+
+        let list = AiToolsConfig::List(vec!["claude-code".to_string()]);
+        assert_eq!(list.tools_to_install(), vec!["claude-code"]);
     }
 }
