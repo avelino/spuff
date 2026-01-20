@@ -47,6 +47,11 @@ pub enum Commands {
         /// Development mode: upload local spuff-agent binary instead of downloading from GitHub
         #[arg(long)]
         dev: bool,
+
+        /// AI coding tools to install: "all", "none", "ask", or comma-separated list
+        /// (e.g., "claude-code,codex"). Overrides project and global config.
+        #[arg(long, value_name = "TOOLS")]
+        ai_tools: Option<String>,
     },
 
     /// Destroy the current environment
@@ -135,6 +140,12 @@ pub enum Commands {
         /// Command to execute
         command: String,
     },
+
+    /// Manage AI coding tools
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +182,27 @@ pub enum ConfigCommands {
 
     /// Open configuration file in editor
     Edit,
+}
+
+#[derive(Subcommand)]
+pub enum AiCommands {
+    /// List available AI coding tools
+    List,
+
+    /// Show AI tools installation status on remote environment
+    Status,
+
+    /// Install a specific AI tool on the remote environment
+    Install {
+        /// Tool to install: claude-code, codex, or opencode
+        tool: String,
+    },
+
+    /// Show information about a specific AI tool
+    Info {
+        /// Tool name: claude-code, codex, or opencode
+        tool: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,9 +256,11 @@ impl Cli {
                 region,
                 no_connect,
                 dev,
+                ai_tools,
             } => {
                 let config = AppConfig::load()?;
-                commands::up::execute(&config, size, snapshot, region, no_connect, dev).await
+                commands::up::execute(&config, size, snapshot, region, no_connect, dev, ai_tools)
+                    .await
             }
             Commands::Down { snapshot, force } => {
                 let config = AppConfig::load()?;
@@ -296,6 +330,15 @@ impl Cli {
             Commands::Exec { command } => {
                 let config = AppConfig::load()?;
                 commands::agent::exec(&config, command).await
+            }
+            Commands::Ai { command } => {
+                let config = AppConfig::load()?;
+                match command {
+                    AiCommands::List => commands::ai::list().await,
+                    AiCommands::Status => commands::ai::status(&config).await,
+                    AiCommands::Install { tool } => commands::ai::install(&config, tool).await,
+                    AiCommands::Info { tool } => commands::ai::info(&tool).await,
+                }
             }
         }
     }

@@ -48,7 +48,9 @@ write_files:
         "docker": true,
         "shell_tools": true,
         "nodejs": true,
-        "claude_code": true,
+        "claude_code": {{ ai_claude_code }},
+        "codex": {{ ai_codex }},
+        "opencode": {{ ai_opencode }},
         "environment": {% if environment %}"{{ environment }}"{% else %}null{% endif %},
         "dotfiles": {% if dotfiles %}"{{ dotfiles }}"{% else %}null{% endif %},
         "tailscale": {% if tailscale_enabled %}true{% else %}false{% endif %},
@@ -422,9 +424,20 @@ runcmd:
 final_message: "spuff cloud-init done in $UPTIME seconds - bootstrap running async"
 "#;
 
+/// Generate cloud-init configuration (used by tests)
+#[cfg(test)]
 pub fn generate_cloud_init(
     config: &AppConfig,
     project_config: Option<&ProjectConfig>,
+) -> Result<String> {
+    generate_cloud_init_with_ai_tools(config, project_config, None)
+}
+
+/// Generate cloud-init with explicit AI tools override from CLI
+pub fn generate_cloud_init_with_ai_tools(
+    config: &AppConfig,
+    project_config: Option<&ProjectConfig>,
+    cli_ai_tools: Option<&crate::project_config::AiToolsConfig>,
 ) -> Result<String> {
     let mut tera = Tera::default();
     tera.add_raw_template("cloud-init", CLOUD_INIT_TEMPLATE)?;
@@ -452,6 +465,18 @@ pub fn generate_cloud_init(
             crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e))
         })?;
 
+    // Determine AI tools configuration
+    // Priority: CLI > Project config > Global config > Default (all)
+    let ai_tools = cli_ai_tools
+        .or(project_config.map(|pc| &pc.ai_tools))
+        .or(config.ai_tools.as_ref())
+        .cloned()
+        .unwrap_or(crate::project_config::AiToolsConfig::All);
+
+    let ai_claude_code = ai_tools.should_install("claude-code");
+    let ai_codex = ai_tools.should_install("codex");
+    let ai_opencode = ai_tools.should_install("opencode");
+
     let mut context = Context::new();
     context.insert("username", &config.ssh_user);
     context.insert("home_dir", &home_dir);
@@ -465,6 +490,10 @@ pub fn generate_cloud_init(
     context.insert("agent_token", &config.agent_token);
     context.insert("project_config", &project_config_json);
     context.insert("has_project_config", &project_config.is_some());
+    // AI tools configuration
+    context.insert("ai_claude_code", &ai_claude_code);
+    context.insert("ai_codex", &ai_codex);
+    context.insert("ai_opencode", &ai_opencode);
 
     let rendered = tera.render("cloud-init", &context)?;
     Ok(rendered)
@@ -696,9 +725,47 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config, None).unwrap();
-        // Node.js and Claude Code are now installed via agent, config in devtools.json
+        // Node.js and AI tools are now installed via agent, config in devtools.json
         assert!(result.contains("\"nodejs\": true"));
         assert!(result.contains("\"claude_code\": true"));
+        assert!(result.contains("\"codex\": true"));
+        assert!(result.contains("\"opencode\": true"));
+    }
+
+    #[test]
+    fn test_cloud_init_ai_tools_none() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ai_tools: Some(crate::project_config::AiToolsConfig::None),
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, None).unwrap();
+        // All AI tools should be disabled
+        assert!(result.contains("\"claude_code\": false"));
+        assert!(result.contains("\"codex\": false"));
+        assert!(result.contains("\"opencode\": false"));
+    }
+
+    #[test]
+    fn test_cloud_init_ai_tools_specific() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ai_tools: Some(crate::project_config::AiToolsConfig::List(vec![
+                "claude-code".to_string(),
+            ])),
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, None).unwrap();
+        // Only claude-code should be enabled
+        assert!(result.contains("\"claude_code\": true"));
+        assert!(result.contains("\"codex\": false"));
+        assert!(result.contains("\"opencode\": false"));
     }
 
     #[test]

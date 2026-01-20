@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SpuffError};
+use crate::project_config::AiToolsConfig;
 use crate::provider::ProviderType;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,11 @@ pub struct AppConfig {
     /// When set, the agent requires this token in the X-Spuff-Token header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_token: Option<String>,
+    /// AI coding tools preference (claude-code, codex, opencode).
+    /// Can be "all", "none", or a list of specific tools.
+    /// This is the user's default preference, can be overridden by project config or CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_tools: Option<AiToolsConfig>,
 }
 
 fn default_ssh_user() -> String {
@@ -48,6 +54,7 @@ impl Default for AppConfig {
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None, // None means use default (all)
         }
     }
 }
@@ -289,6 +296,7 @@ mod tests {
         assert_eq!(config.ssh_user, "dev");
         assert!(!config.tailscale_enabled);
         assert!(config.agent_token.is_none());
+        assert!(config.ai_tools.is_none()); // None means use default (all)
     }
 
     #[test]
@@ -306,6 +314,7 @@ mod tests {
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -316,6 +325,8 @@ mod tests {
         assert!(!yaml.contains("api_token"));
         // agent_token should not appear when None
         assert!(!yaml.contains("agent_token"));
+        // ai_tools should not appear when None
+        assert!(!yaml.contains("ai_tools"));
     }
 
     #[test]
@@ -396,6 +407,7 @@ tailscale_authkey: tskey-xxx
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None,
         };
 
         config.save().unwrap();
