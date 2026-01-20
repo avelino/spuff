@@ -1,8 +1,8 @@
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use console::style;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
@@ -11,6 +11,7 @@ use crate::environment::cloud_init::generate_cloud_init;
 use crate::error::{Result, SpuffError};
 use crate::project_config::ProjectConfig;
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
+use crate::ssh::{is_key_in_agent, key_has_passphrase, is_ssh_agent_running};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
 
@@ -732,190 +733,69 @@ async fn check_cloud_init_status(ip: &str, config: &AppConfig) -> Result<bool> {
     Ok(output.contains("\"status\": \"done\"") || output.contains("\"status\":\"done\""))
 }
 
-/// Check if SSH key is loaded in the agent
-async fn is_key_in_agent(key_path: &str) -> bool {
-    // Get the key fingerprint
-    let fp_result = Command::new("ssh-keygen")
-        .arg("-lf")
-        .arg(key_path)
-        .output()
-        .await;
-
-    let fingerprint = match fp_result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.split_whitespace().nth(1).map(|s| s.to_string())
-        }
-        Err(_) => None,
-    };
-
-    let Some(fp) = fingerprint else {
-        return false;
-    };
-
-    // Check if fingerprint is in agent
-    let agent_result = Command::new("ssh-add")
-        .arg("-l")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    match agent_result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.contains(&fp)
-        }
-        Err(_) => false,
-    }
-}
-
-/// Check if SSH key has a passphrase
-async fn key_has_passphrase(key_path: &str) -> bool {
-    // Try to read the key with empty passphrase
-    let result = Command::new("ssh-keygen")
-        .arg("-y")
-        .arg("-P")
-        .arg("")
-        .arg("-f")
-        .arg(key_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-
-    // If it fails, the key has a passphrase
-    !matches!(result, Ok(status) if status.success())
-}
-
-/// Check if ssh-agent is running and accessible
-async fn is_ssh_agent_running() -> bool {
-    // Check if SSH_AUTH_SOCK is set and the socket exists
-    if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
-        if std::path::Path::new(&sock).exists() {
-            // Try to actually connect to it
-            let result = Command::new("ssh-add")
-                .arg("-l")
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
-
-            if let Ok(output) = result {
-                // exit code 2 means agent not running, 1 means no keys but agent is running
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return !stderr.contains("Could not open") && !stderr.contains("Connection refused");
-            }
-        }
-    }
-    false
-}
-
-/// Start ssh-agent and set environment variables
-async fn start_ssh_agent() -> Result<()> {
-    // Start ssh-agent and capture its output
-    let output = Command::new("ssh-agent")
-        .arg("-s") // Bourne shell output format
-        .output()
-        .await
-        .map_err(|e| SpuffError::Ssh(format!("Failed to start ssh-agent: {}", e)))?;
-
-    if !output.status.success() {
-        return Err(SpuffError::Ssh("Failed to start ssh-agent".to_string()));
-    }
-
-    // Parse the output to get SSH_AUTH_SOCK and SSH_AGENT_PID
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.starts_with("SSH_AUTH_SOCK=") {
-            if let Some(value) = line.strip_prefix("SSH_AUTH_SOCK=") {
-                let value = value.trim_end_matches("; export SSH_AUTH_SOCK;");
-                std::env::set_var("SSH_AUTH_SOCK", value);
-            }
-        } else if line.starts_with("SSH_AGENT_PID=") {
-            if let Some(value) = line.strip_prefix("SSH_AGENT_PID=") {
-                let value = value.trim_end_matches("; export SSH_AGENT_PID;");
-                std::env::set_var("SSH_AGENT_PID", value);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Verify SSH key is accessible, prompting for passphrase if needed
+/// Verify SSH key is accessible for authentication.
+///
+/// Uses pure Rust SSH libraries - no external binaries required.
+///
+/// Checks:
+/// 1. SSH agent is running (SSH_AUTH_SOCK exists)
+/// 2. Key is either in the agent OR has no passphrase
+///
+/// If the key requires a passphrase and is not in the agent, returns an error
+/// with instructions for the user to manually add the key.
 async fn verify_ssh_key_accessible(config: &AppConfig) -> Result<()> {
-    // Check if key is already in agent
-    if is_key_in_agent(&config.ssh_key_path).await {
-        return Ok(());
+    let key_path = PathBuf::from(&config.ssh_key_path);
+
+    // Check if key exists
+    if !key_path.exists() {
+        return Err(SpuffError::Ssh(format!(
+            "SSH key not found: {}",
+            config.ssh_key_path
+        )));
     }
 
-    // Check if key has passphrase
-    if !key_has_passphrase(&config.ssh_key_path).await {
-        // Key has no passphrase - good to go
-        return Ok(());
-    }
-
-    // Key has passphrase and is not in agent - need to add it
-    add_key_to_agent(config).await
-}
-
-/// Add SSH key to agent interactively
-async fn add_key_to_agent(config: &AppConfig) -> Result<()> {
-    // First, ensure ssh-agent is running
-    if !is_ssh_agent_running().await {
-        println!(
-            "{} Starting ssh-agent...",
-            style("→").cyan().bold()
-        );
-        start_ssh_agent().await?;
-    }
-
-    // Prompt user to add the key
-    println!(
-        "\n{} SSH key requires passphrase: {}",
-        style("🔑").cyan(),
-        style(&config.ssh_key_path).yellow()
-    );
-    println!(
-        "{} Adding key to ssh-agent...\n",
-        style("→").cyan().bold()
-    );
-
-    // On macOS, use Keychain to persist the key across sessions
-    let is_macos = cfg!(target_os = "macos");
-
-    // Run ssh-add interactively so user can enter passphrase
-    let mut cmd = Command::new("ssh-add");
-    if is_macos {
-        cmd.arg("--apple-use-keychain"); // Store passphrase in macOS Keychain
-    }
-    cmd.arg(&config.ssh_key_path);
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "\n{} Key added successfully!\n",
-                style("✓").green().bold()
-            );
-            Ok(())
+    // Check if key has no passphrase (can be used directly)
+    match key_has_passphrase(&key_path) {
+        Ok(false) => {
+            // Key has no passphrase - can be used directly
+            return Ok(());
         }
-        Ok(_) => Err(SpuffError::Ssh(
-            "Failed to add SSH key to agent. Make sure you entered the correct passphrase."
-                .to_string(),
-        )),
-        Err(e) => Err(SpuffError::Ssh(format!(
-            "Failed to run ssh-add: {}",
-            e
-        ))),
+        Ok(true) => {
+            // Key has passphrase - need agent
+        }
+        Err(e) => {
+            return Err(SpuffError::Ssh(format!(
+                "Failed to check SSH key: {}. Make sure the key format is supported.",
+                e
+            )));
+        }
     }
+
+    // Key has passphrase - check if agent is running
+    if !is_ssh_agent_running() {
+        return Err(SpuffError::Ssh(
+            "SSH key requires passphrase but ssh-agent is not running.\n\
+             Start ssh-agent and add your key:\n  \
+             eval \"$(ssh-agent -s)\"\n  \
+             ssh-add ~/.ssh/id_ed25519"
+                .to_string(),
+        ));
+    }
+
+    // Check if key is loaded in the agent
+    if is_key_in_agent(&key_path).await {
+        return Ok(());
+    }
+
+    // Key has passphrase but not in agent
+    Err(SpuffError::Ssh(format!(
+        "SSH key requires passphrase but is not loaded in the agent.\n\
+         Add your key to the agent:\n  \
+         ssh-add {}\n\n\
+         On macOS, you can also use Keychain:\n  \
+         ssh-add --apple-use-keychain {}",
+        config.ssh_key_path, config.ssh_key_path
+    )))
 }
 
 /// Upload local spuff-agent binary and ensure the service is running

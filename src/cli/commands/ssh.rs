@@ -1,11 +1,16 @@
-use std::process::Stdio;
+//! SSH command implementation using pure Rust.
+//!
+//! This module provides SSH connectivity with optional port forwarding,
+//! using pure Rust libraries instead of external SSH binaries.
+
+use std::path::PathBuf;
 
 use console::style;
-use tokio::process::Command;
 
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
 use crate::project_config::ProjectConfig;
+use crate::ssh::{SshClient, SshConfig};
 use crate::state::StateDb;
 
 const BANNER: &str = r#"
@@ -17,6 +22,15 @@ const BANNER: &str = r#"
 
 pub fn print_banner() {
     println!("{}", style(BANNER).cyan());
+}
+
+/// Convert AppConfig to SshConfig for SSH operations.
+fn app_config_to_ssh_config(config: &AppConfig) -> SshConfig {
+    SshConfig {
+        user: config.ssh_user.clone(),
+        key_path: PathBuf::from(&config.ssh_key_path),
+        host_key_policy: crate::ssh::config::HostKeyPolicy::AcceptNew,
+    }
 }
 
 pub async fn execute(config: &AppConfig) -> Result<()> {
@@ -73,44 +87,18 @@ fn print_tunnel_info(ports: &[u16]) {
     println!();
 }
 
-/// Connect to remote host with SSH tunnels
+/// Connect to remote host with SSH tunnels using pure Rust.
+///
+/// This starts the SSH connection with port forwarding and an interactive shell.
 async fn connect_with_tunnels(host: &str, config: &AppConfig, ports: &[u16]) -> Result<()> {
-    let mut cmd = Command::new("ssh");
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(host, 22, &ssh_config).await?;
 
-    // Enable SSH agent forwarding
-    cmd.arg("-A");
+    // Create port forwards
+    let _forwards = client.forward_ports(ports).await?;
 
-    // Add tunnel arguments for each port
-    for port in ports {
-        cmd.arg("-L").arg(format!("{}:localhost:{}", port, port));
-    }
-
-    // Standard SSH options
-    cmd.arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, host));
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(SpuffError::Ssh(format!(
-            "SSH connection failed with code: {:?}",
-            status.code()
-        )));
-    }
-
-    Ok(())
+    // Start interactive shell (forwards remain active during shell session)
+    client.shell().await
 }
 
 /// Create SSH tunnels in background (without shell)
@@ -149,103 +137,99 @@ pub async fn tunnel(config: &AppConfig, specific_port: Option<u16>, stop: bool) 
 
     print_tunnel_info(&ports);
 
-    // Create background SSH process with tunnels
-    let mut cmd = Command::new("ssh");
+    // Create SSH connection and tunnels using pure Rust
+    let ssh_config = app_config_to_ssh_config(config);
+    let client = SshClient::connect(&instance.ip, 22, &ssh_config).await?;
 
-    // No shell, just tunnels
-    cmd.arg("-N");
+    // Create port forwards
+    let forwards = client.forward_ports(&ports).await?;
 
-    // Keep connection alive
-    cmd.arg("-o").arg("ServerAliveInterval=60");
-    cmd.arg("-o").arg("ServerAliveCountMax=3");
-
-    // Add tunnel arguments for each port
-    for port in &ports {
-        cmd.arg("-L").arg(format!("{}:localhost:{}", port, port));
-    }
-
-    // Standard SSH options
-    cmd.arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-i")
-        .arg(&config.ssh_key_path)
-        .arg(format!("{}@{}", config.ssh_user, instance.ip));
-
-    // Run in background
-    let child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    // Save PID for later
-    let pid = child.id().unwrap_or(0);
-    save_tunnel_pid(pid)?;
+    // Save state so we can stop later
+    save_tunnel_state(&ports)?;
 
     println!(
-        "  {} Tunnels running in background (PID: {})",
-        style("✓").green().bold(),
-        pid
+        "  {} Tunnels active (pure Rust, no external processes)",
+        style("✓").green().bold()
     );
     println!();
     println!(
         "  {} {}",
         style("Stop:").dim(),
-        style("spuff tunnel --stop").cyan()
+        style("Ctrl+C or spuff tunnel --stop").cyan()
     );
     println!();
+
+    // Keep running until interrupted
+    println!(
+        "  {} Tunnels running. Press Ctrl+C to stop...",
+        style("→").dim()
+    );
+
+    // Wait for Ctrl+C
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| SpuffError::Ssh(format!("Failed to wait for signal: {}", e)))?;
+
+    // Stop forwards gracefully
+    for forward in &forwards {
+        forward.stop().await;
+    }
+
+    // Clean up state file
+    let _ = std::fs::remove_file(get_tunnel_state_file()?);
+
+    println!();
+    println!(
+        "  {} Tunnels stopped.",
+        style("✓").green().bold()
+    );
 
     Ok(())
 }
 
 /// Stop background tunnels
 async fn stop_tunnels() -> Result<()> {
-    let pid_file = get_tunnel_pid_file()?;
+    let state_file = get_tunnel_state_file()?;
 
-    if !pid_file.exists() {
+    if !state_file.exists() {
         println!(
-            "  {} No active tunnels found.",
+            "  {} No active tunnel state found.",
             style("○").dim()
+        );
+        println!(
+            "  {} If tunnels are running in another terminal, press Ctrl+C there.",
+            style("i").blue()
         );
         return Ok(());
     }
 
-    let pid_str = std::fs::read_to_string(&pid_file)?;
-    let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+    // Remove state file to indicate stop
+    let _ = std::fs::remove_file(&state_file);
 
-    if pid > 0 {
-        // Try to kill the process
-        #[cfg(unix)]
-        {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status();
-        }
-
-        println!(
-            "  {} Stopped tunnel process (PID: {})",
-            style("✓").green().bold(),
-            pid
-        );
-    }
-
-    // Remove PID file
-    let _ = std::fs::remove_file(&pid_file);
+    println!(
+        "  {} Tunnel state cleared. If tunnels are running, they will continue",
+        style("✓").green().bold()
+    );
+    println!(
+        "  {} until you press Ctrl+C in that terminal.",
+        style("i").blue()
+    );
 
     Ok(())
 }
 
-fn get_tunnel_pid_file() -> Result<std::path::PathBuf> {
+fn get_tunnel_state_file() -> Result<std::path::PathBuf> {
     let config_dir = crate::config::AppConfig::config_dir()?;
-    Ok(config_dir.join("tunnel.pid"))
+    Ok(config_dir.join("tunnel.state"))
 }
 
-fn save_tunnel_pid(pid: u32) -> Result<()> {
-    let pid_file = get_tunnel_pid_file()?;
-    std::fs::write(&pid_file, pid.to_string())?;
+fn save_tunnel_state(ports: &[u16]) -> Result<()> {
+    let state_file = get_tunnel_state_file()?;
+    let content = ports
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(&state_file, content)?;
     Ok(())
 }
