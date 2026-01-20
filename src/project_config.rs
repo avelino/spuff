@@ -190,13 +190,11 @@ impl ProjectConfig {
 
     /// Load project configuration from a path
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            SpuffError::Config(format!("Failed to read {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SpuffError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        let mut config: ProjectConfig = serde_yaml::from_str(&content).map_err(|e| {
-            SpuffError::Config(format!("Invalid spuff.yaml: {}", e))
-        })?;
+        let mut config: ProjectConfig = serde_yaml::from_str(&content)
+            .map_err(|e| SpuffError::Config(format!("Invalid spuff.yaml: {}", e)))?;
 
         // Load secrets if they exist
         let secrets_path = path.with_file_name("spuff.secrets.yaml");
@@ -220,9 +218,8 @@ impl ProjectConfig {
 
     /// Merge secrets from spuff.secrets.yaml
     fn merge_secrets(&mut self, path: &Path) -> Result<()> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            SpuffError::Config(format!("Failed to read {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SpuffError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
         #[derive(Deserialize)]
         struct Secrets {
@@ -230,9 +227,8 @@ impl ProjectConfig {
             env: HashMap<String, String>,
         }
 
-        let secrets: Secrets = serde_yaml::from_str(&content).map_err(|e| {
-            SpuffError::Config(format!("Invalid spuff.secrets.yaml: {}", e))
-        })?;
+        let secrets: Secrets = serde_yaml::from_str(&content)
+            .map_err(|e| SpuffError::Config(format!("Invalid spuff.secrets.yaml: {}", e)))?;
 
         // Secrets override env vars from main config
         for (key, value) in secrets.env {
@@ -258,7 +254,8 @@ fn resolve_env_value(value: &str) -> String {
     let mut result = value.to_string();
 
     // Match ${VAR:-default} pattern
-    let re_with_default = regex_lite::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}").unwrap();
+    let re_with_default =
+        regex_lite::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}").unwrap();
     result = re_with_default
         .replace_all(&result, |caps: &regex_lite::Captures| {
             let var_name = &caps[1];
@@ -289,20 +286,15 @@ fn resolve_env_value(value: &str) -> String {
 }
 
 /// Status of a project setup item
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupStatus {
+    #[default]
     Pending,
     InProgress,
     Done,
     Failed(String),
     Skipped,
-}
-
-impl Default for SetupStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 /// Status of the entire project setup

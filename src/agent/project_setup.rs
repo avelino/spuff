@@ -92,13 +92,13 @@ impl RepositoryConfig {
             }
             RepositoryConfig::Full { url, path, .. } => {
                 if let Some(p) = path {
-                    if p.starts_with('~') {
-                        p.clone()
-                    } else {
-                        p.clone()
-                    }
+                    p.clone()
                 } else {
-                    let name = url.rsplit('/').next().unwrap_or(url).trim_end_matches(".git");
+                    let name = url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(url)
+                        .trim_end_matches(".git");
                     format!("{}/{}", projects_dir, name)
                 }
             }
@@ -242,7 +242,8 @@ impl ProjectSetupManager {
 
     /// Start project setup with the loaded config
     pub async fn start_setup(&self) -> Result<(), String> {
-        let config = Self::load_config().ok_or("No project config found at /opt/spuff/project.json")?;
+        let config =
+            Self::load_config().ok_or("No project config found at /opt/spuff/project.json")?;
 
         // Check if already running
         {
@@ -416,7 +417,11 @@ impl ProjectSetupInstaller {
         let log_file = format!("/var/log/spuff/bundles/{}.log", bundle_name);
 
         tracing::info!("Installing bundle: {}", bundle_name);
-        self.log_to_file(&log_file, &format!("[INFO] Starting {} bundle installation", bundle_name)).await;
+        self.log_to_file(
+            &log_file,
+            &format!("[INFO] Starting {} bundle installation", bundle_name),
+        )
+        .await;
 
         let result = match bundle_name {
             "rust" => self.install_rust(&log_file).await,
@@ -442,11 +447,19 @@ impl ProjectSetupInstaller {
                     Ok(version) => {
                         bundle.status = SetupStatus::Done;
                         bundle.version = version;
-                        self.log_to_file(&log_file, &format!("[SUCCESS] {} bundle installed", bundle_name)).await;
+                        self.log_to_file(
+                            &log_file,
+                            &format!("[SUCCESS] {} bundle installed", bundle_name),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         bundle.status = SetupStatus::Failed(e.clone());
-                        self.log_to_file(&log_file, &format!("[FAIL] {} bundle failed: {}", bundle_name, e)).await;
+                        self.log_to_file(
+                            &log_file,
+                            &format!("[FAIL] {} bundle failed: {}", bundle_name, e),
+                        )
+                        .await;
                     }
                 }
             }
@@ -464,15 +477,35 @@ impl ProjectSetupInstaller {
         // Source cargo env
         let cargo_env = format!("{}/.cargo/env", self.home_dir);
         if Path::new(&cargo_env).exists() {
-            std::env::set_var("PATH", format!("{}/.cargo/bin:{}", self.home_dir, std::env::var("PATH").unwrap_or_default()));
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}/.cargo/bin:{}",
+                    self.home_dir,
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
         }
 
         // Get version
-        let version = self.get_cmd_output("~/.cargo/bin/rustc --version").await.ok();
+        let version = self
+            .get_cmd_output("~/.cargo/bin/rustc --version")
+            .await
+            .ok();
 
         // Install additional tools
-        self.run_cmd_logged("~/.cargo/bin/rustup component add rust-analyzer clippy rustfmt", log_file).await.ok();
-        self.run_cmd_logged("~/.cargo/bin/cargo install cargo-watch cargo-edit sccache", log_file).await.ok();
+        self.run_cmd_logged(
+            "~/.cargo/bin/rustup component add rust-analyzer clippy rustfmt",
+            log_file,
+        )
+        .await
+        .ok();
+        self.run_cmd_logged(
+            "~/.cargo/bin/cargo install cargo-watch cargo-edit sccache",
+            log_file,
+        )
+        .await
+        .ok();
 
         Ok(version)
     }
@@ -486,15 +519,36 @@ impl ProjectSetupInstaller {
         .await?;
 
         // Add to PATH
-        std::env::set_var("PATH", format!("/usr/local/go/bin:{}", std::env::var("PATH").unwrap_or_default()));
+        std::env::set_var(
+            "PATH",
+            format!(
+                "/usr/local/go/bin:{}",
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
 
         // Get version
-        let version = self.get_cmd_output("/usr/local/go/bin/go version").await.ok();
+        let version = self
+            .get_cmd_output("/usr/local/go/bin/go version")
+            .await
+            .ok();
 
         // Install tools
-        self.run_cmd_logged("go install golang.org/x/tools/gopls@latest", log_file).await.ok();
-        self.run_cmd_logged("go install github.com/go-delve/delve/cmd/dlv@latest", log_file).await.ok();
-        self.run_cmd_logged("go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest", log_file).await.ok();
+        self.run_cmd_logged("go install golang.org/x/tools/gopls@latest", log_file)
+            .await
+            .ok();
+        self.run_cmd_logged(
+            "go install github.com/go-delve/delve/cmd/dlv@latest",
+            log_file,
+        )
+        .await
+        .ok();
+        self.run_cmd_logged(
+            "go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest",
+            log_file,
+        )
+        .await
+        .ok();
 
         Ok(version)
     }
@@ -508,13 +562,17 @@ impl ProjectSetupInstaller {
         .await?;
 
         // Install uv
-        self.run_cmd_logged("curl -LsSf https://astral.sh/uv/install.sh | sh", log_file).await.ok();
+        self.run_cmd_logged("curl -LsSf https://astral.sh/uv/install.sh | sh", log_file)
+            .await
+            .ok();
 
         // Get version
         let version = self.get_cmd_output("python3 --version").await.ok();
 
         // Install Python tools
-        self.run_cmd_logged("pip3 install --user ruff pyright ipython", log_file).await.ok();
+        self.run_cmd_logged("pip3 install --user ruff pyright ipython", log_file)
+            .await
+            .ok();
 
         Ok(version)
     }
@@ -527,24 +585,27 @@ impl ProjectSetupInstaller {
         )
         .await?;
 
-        self.run_cmd_logged("sudo apt-get install -y nodejs", log_file).await?;
+        self.run_cmd_logged("sudo apt-get install -y nodejs", log_file)
+            .await?;
 
         // Get version
         let version = self.get_cmd_output("node --version").await.ok();
 
         // Install pnpm and tools
-        self.run_cmd_logged("sudo npm install -g pnpm typescript eslint prettier", log_file).await.ok();
+        self.run_cmd_logged(
+            "sudo npm install -g pnpm typescript eslint prettier",
+            log_file,
+        )
+        .await
+        .ok();
 
         Ok(version)
     }
 
     async fn install_elixir(&self, log_file: &str) -> Result<Option<String>, String> {
         // Install Erlang and Elixir
-        self.run_cmd_logged(
-            "sudo apt-get install -y erlang elixir",
-            log_file,
-        )
-        .await?;
+        self.run_cmd_logged("sudo apt-get install -y erlang elixir", log_file)
+            .await?;
 
         // Get version
         let version = self.get_cmd_output("elixir --version | head -1").await.ok();
@@ -596,17 +657,16 @@ impl ProjectSetupInstaller {
 
     async fn install_ruby(&self, log_file: &str) -> Result<Option<String>, String> {
         // Install Ruby
-        self.run_cmd_logged(
-            "sudo apt-get install -y ruby ruby-dev",
-            log_file,
-        )
-        .await?;
+        self.run_cmd_logged("sudo apt-get install -y ruby ruby-dev", log_file)
+            .await?;
 
         // Get version
         let version = self.get_cmd_output("ruby --version").await.ok();
 
         // Install bundler
-        self.run_cmd_logged("sudo gem install bundler solargraph rubocop", log_file).await.ok();
+        self.run_cmd_logged("sudo gem install bundler solargraph rubocop", log_file)
+            .await
+            .ok();
 
         Ok(version)
     }
@@ -623,24 +683,33 @@ impl ProjectSetupInstaller {
         }
 
         let log_file = "/var/log/spuff/packages.log";
-        self.log_to_file(log_file, "[INFO] Starting package installation").await;
+        self.log_to_file(log_file, "[INFO] Starting package installation")
+            .await;
 
         // Update apt
-        self.run_cmd_logged("sudo apt-get update", log_file).await.ok();
+        self.run_cmd_logged("sudo apt-get update", log_file)
+            .await
+            .ok();
 
         let mut installed = vec![];
         let mut failed = vec![];
 
         for package in &self.config.packages {
-            self.log_to_file(log_file, &format!("[CMD] apt-get install -y {}", package)).await;
-            match self.run_cmd_logged(&format!("sudo apt-get install -y {}", package), log_file).await {
+            self.log_to_file(log_file, &format!("[CMD] apt-get install -y {}", package))
+                .await;
+            match self
+                .run_cmd_logged(&format!("sudo apt-get install -y {}", package), log_file)
+                .await
+            {
                 Ok(_) => {
                     installed.push(package.clone());
-                    self.log_to_file(log_file, &format!("[OK] {} installed", package)).await;
+                    self.log_to_file(log_file, &format!("[OK] {} installed", package))
+                        .await;
                 }
                 Err(e) => {
                     failed.push(package.clone());
-                    self.log_to_file(log_file, &format!("[FAIL] {} failed: {}", package, e)).await;
+                    self.log_to_file(log_file, &format!("[FAIL] {} failed: {}", package, e))
+                        .await;
                 }
             }
         }
@@ -664,7 +733,8 @@ impl ProjectSetupInstaller {
         }
 
         let log_file = "/var/log/spuff/repositories.log";
-        self.log_to_file(log_file, "[INFO] Starting repository cloning").await;
+        self.log_to_file(log_file, "[INFO] Starting repository cloning")
+            .await;
 
         // Create projects directory
         let projects_dir = format!("{}/projects", self.home_dir);
@@ -683,7 +753,8 @@ impl ProjectSetupInstaller {
             let path = repo_config.path(&projects_dir);
             let branch = repo_config.branch();
 
-            self.log_to_file(log_file, &format!("[CMD] git clone {} {}", url, path)).await;
+            self.log_to_file(log_file, &format!("[CMD] git clone {} {}", url, path))
+                .await;
 
             let mut cmd = format!("git clone --depth 1 {} {}", url, path);
             if let Some(ref b) = branch {
@@ -699,11 +770,13 @@ impl ProjectSetupInstaller {
                     match result {
                         Ok(_) => {
                             repo.status = SetupStatus::Done;
-                            self.log_to_file(log_file, &format!("[OK] {} cloned", url)).await;
+                            self.log_to_file(log_file, &format!("[OK] {} cloned", url))
+                                .await;
                         }
                         Err(e) => {
                             repo.status = SetupStatus::Failed(e.clone());
-                            self.log_to_file(log_file, &format!("[FAIL] {} failed: {}", url, e)).await;
+                            self.log_to_file(log_file, &format!("[FAIL] {} failed: {}", url, e))
+                                .await;
                         }
                     }
                 }
@@ -723,7 +796,8 @@ impl ProjectSetupInstaller {
         }
 
         let log_file = "/var/log/spuff/services.log";
-        self.log_to_file(log_file, "[INFO] Starting docker-compose services").await;
+        self.log_to_file(log_file, "[INFO] Starting docker-compose services")
+            .await;
 
         // Check if compose file exists in any cloned repo
         let projects_dir = format!("{}/projects", self.home_dir);
@@ -742,7 +816,11 @@ impl ProjectSetupInstaller {
         }
 
         let Some(compose_path) = compose_path else {
-            self.log_to_file(log_file, &format!("[WARN] {} not found in any repository", compose_file)).await;
+            self.log_to_file(
+                log_file,
+                &format!("[WARN] {} not found in any repository", compose_file),
+            )
+            .await;
             let mut state = self.state.write().await;
             state.services.status = SetupStatus::Skipped;
             return;
@@ -779,7 +857,9 @@ impl ProjectSetupInstaller {
     }
 
     async fn get_docker_containers(&self) -> Vec<ContainerStatus> {
-        let output = self.get_cmd_output("docker ps --format '{{.Names}}|{{.Status}}|{{.Ports}}'").await;
+        let output = self
+            .get_cmd_output("docker ps --format '{{.Names}}|{{.Status}}|{{.Ports}}'")
+            .await;
         let Ok(output) = output else {
             return vec![];
         };
@@ -791,14 +871,19 @@ impl ProjectSetupInstaller {
                 if parts.len() >= 2 {
                     let port = parts.get(2).and_then(|p| {
                         // Extract first port number from ports string
-                        p.split(':').nth(1).and_then(|s| {
-                            s.split('-').next().and_then(|s| s.parse().ok())
-                        })
+                        p.split(':')
+                            .nth(1)
+                            .and_then(|s| s.split('-').next().and_then(|s| s.parse().ok()))
                     });
 
                     Some(ContainerStatus {
                         name: parts[0].to_string(),
-                        status: if parts[1].contains("Up") { "running" } else { "stopped" }.to_string(),
+                        status: if parts[1].contains("Up") {
+                            "running"
+                        } else {
+                            "stopped"
+                        }
+                        .to_string(),
                         port,
                     })
                 } else {
@@ -825,7 +910,8 @@ impl ProjectSetupInstaller {
             }
 
             let log_file = format!("/var/log/spuff/scripts/{:03}.log", i + 1);
-            self.log_to_file(&log_file, &format!("[CMD] {}", script)).await;
+            self.log_to_file(&log_file, &format!("[CMD] {}", script))
+                .await;
 
             // Run script in the first project directory if it exists
             let cmd = if Path::new(&projects_dir).exists() {
@@ -845,15 +931,24 @@ impl ProjectSetupInstaller {
                             s.exit_code = Some(code);
                             if code == 0 {
                                 s.status = SetupStatus::Done;
-                                self.log_to_file(&log_file, &format!("[SUCCESS] Script completed with exit code {}", code)).await;
+                                self.log_to_file(
+                                    &log_file,
+                                    &format!("[SUCCESS] Script completed with exit code {}", code),
+                                )
+                                .await;
                             } else {
                                 s.status = SetupStatus::Failed(format!("Exit code: {}", code));
-                                self.log_to_file(&log_file, &format!("[FAIL] Script failed with exit code {}", code)).await;
+                                self.log_to_file(
+                                    &log_file,
+                                    &format!("[FAIL] Script failed with exit code {}", code),
+                                )
+                                .await;
                             }
                         }
                         Err(e) => {
                             s.status = SetupStatus::Failed(e.clone());
-                            self.log_to_file(&log_file, &format!("[FAIL] Script error: {}", e)).await;
+                            self.log_to_file(&log_file, &format!("[FAIL] Script error: {}", e))
+                                .await;
                         }
                     }
                 }
@@ -863,7 +958,8 @@ impl ProjectSetupInstaller {
 
     async fn run_hook(&self, name: &str, script: &str) {
         let log_file = format!("/var/log/spuff/hook-{}.log", name);
-        self.log_to_file(&log_file, &format!("[CMD] Running {} hook", name)).await;
+        self.log_to_file(&log_file, &format!("[CMD] Running {} hook", name))
+            .await;
         self.log_to_file(&log_file, script).await;
 
         if let Err(e) = self.run_cmd_as_user(script, &log_file).await {
@@ -888,21 +984,30 @@ impl ProjectSetupInstaller {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if !stdout.is_empty() {
-            self.log_to_file(log_file, &format!("[OUTPUT] {}", stdout)).await;
+            self.log_to_file(log_file, &format!("[OUTPUT] {}", stdout))
+                .await;
         }
         if !stderr.is_empty() {
-            self.log_to_file(log_file, &format!("[STDERR] {}", stderr)).await;
+            self.log_to_file(log_file, &format!("[STDERR] {}", stderr))
+                .await;
         }
 
         if output.status.success() {
             Ok(())
         } else {
-            Err(format!("Command failed with code {:?}", output.status.code()))
+            Err(format!(
+                "Command failed with code {:?}",
+                output.status.code()
+            ))
         }
     }
 
     async fn run_cmd_as_user(&self, cmd: &str, log_file: &str) -> Result<i32, String> {
-        self.log_to_file(log_file, &format!("[CMD] su {} -c '{}'", self.username, cmd)).await;
+        self.log_to_file(
+            log_file,
+            &format!("[CMD] su {} -c '{}'", self.username, cmd),
+        )
+        .await;
 
         let output = Command::new("su")
             .arg(&self.username)
@@ -919,13 +1024,18 @@ impl ProjectSetupInstaller {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if !stdout.is_empty() {
-            self.log_to_file(log_file, &format!("[OUTPUT] {}", stdout)).await;
+            self.log_to_file(log_file, &format!("[OUTPUT] {}", stdout))
+                .await;
         }
         if !stderr.is_empty() {
-            self.log_to_file(log_file, &format!("[STDERR] {}", stderr)).await;
+            self.log_to_file(log_file, &format!("[STDERR] {}", stderr))
+                .await;
         }
 
-        output.status.code().ok_or_else(|| "Process terminated by signal".to_string())
+        output
+            .status
+            .code()
+            .ok_or_else(|| "Process terminated by signal".to_string())
     }
 
     async fn get_cmd_output(&self, cmd: &str) -> Result<String, String> {

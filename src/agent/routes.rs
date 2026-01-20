@@ -100,7 +100,6 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedState {
     }
 }
 
-
 /// Standard API error response.
 #[derive(Debug, Serialize)]
 pub struct ApiError {
@@ -240,10 +239,15 @@ async fn exec(
     match result {
         Ok(Ok(output)) => {
             let exit_code = output.status.code().unwrap_or(-1);
-            state.log_activity(
-                "exec",
-                Some(format!("cmd='{}' exit={} duration={}ms", cmd_preview, exit_code, duration_ms))
-            ).await;
+            state
+                .log_activity(
+                    "exec",
+                    Some(format!(
+                        "cmd='{}' exit={} duration={}ms",
+                        cmd_preview, exit_code, duration_ms
+                    )),
+                )
+                .await;
             Ok(Json(ExecResponse {
                 exit_code,
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -252,10 +256,12 @@ async fn exec(
             }))
         }
         Ok(Err(e)) => {
-            state.log_activity(
-                "exec_failed",
-                Some(format!("cmd='{}' error={}", cmd_preview, e))
-            ).await;
+            state
+                .log_activity(
+                    "exec_failed",
+                    Some(format!("cmd='{}' error={}", cmd_preview, e)),
+                )
+                .await;
             tracing::error!("Command execution failed: {}", e);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -263,10 +269,12 @@ async fn exec(
             ))
         }
         Err(_) => {
-            state.log_activity(
-                "exec_timeout",
-                Some(format!("cmd='{}' timeout={}s", cmd_preview, timeout))
-            ).await;
+            state
+                .log_activity(
+                    "exec_timeout",
+                    Some(format!("cmd='{}' timeout={}s", cmd_preview, timeout)),
+                )
+                .await;
             Err((
                 StatusCode::REQUEST_TIMEOUT,
                 Json(ApiError::new(format!(
@@ -389,7 +397,11 @@ async fn logs(
 
     // Read the last N lines efficiently without loading entire file
     let lines_vec = read_last_lines(&validated_path, lines).map_err(|e| {
-        tracing::warn!("Failed to read log file '{}': {}", validated_path.display(), e);
+        tracing::warn!(
+            "Failed to read log file '{}': {}",
+            validated_path.display(),
+            e
+        );
         (
             StatusCode::NOT_FOUND,
             Json(ApiError::new(format!("Cannot read file: {}", e))),
@@ -491,10 +503,7 @@ async fn cloud_init_status(AuthenticatedState(state): AuthenticatedState) -> imp
     let (status, done, errors) = if let Some(output) = status_output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            let status = json["status"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
+            let status = json["status"].as_str().unwrap_or("unknown").to_string();
             let done = status == "done";
             let errors: Vec<String> = json["errors"]
                 .as_array()
@@ -569,27 +578,26 @@ async fn devtools_install(
     state.update_activity().await;
 
     // Log the installation request
-    state.log_activity(
-        "devtools_install",
-        Some(format!(
-            "docker={} shell_tools={} nodejs={} claude_code={} env={:?}",
-            config.docker, config.shell_tools, config.nodejs, config.claude_code, config.environment
-        ))
-    ).await;
+    state
+        .log_activity(
+            "devtools_install",
+            Some(format!(
+                "docker={} shell_tools={} nodejs={} claude_code={} env={:?}",
+                config.docker,
+                config.shell_tools,
+                config.nodejs,
+                config.claude_code,
+                config.environment
+            )),
+        )
+        .await;
 
     match state.devtools.install(config).await {
-        Ok(()) => {
-            Ok(Json(serde_json::json!({
-                "status": "started",
-                "message": "Devtools installation started. Poll GET /devtools for status."
-            })))
-        }
-        Err(e) => {
-            Err((
-                StatusCode::CONFLICT,
-                Json(ApiError::new(e)),
-            ))
-        }
+        Ok(()) => Ok(Json(serde_json::json!({
+            "status": "started",
+            "message": "Devtools installation started. Poll GET /devtools for status."
+        }))),
+        Err(e) => Err((StatusCode::CONFLICT, Json(ApiError::new(e)))),
     }
 }
 
@@ -607,7 +615,7 @@ async fn project_config(AuthenticatedState(state): AuthenticatedState) -> impl I
         None => Json(serde_json::json!({
             "found": false,
             "message": "No project config found at /opt/spuff/project.json"
-        }))
+        })),
     }
 }
 
@@ -630,24 +638,19 @@ async fn project_setup(
     state.update_activity().await;
 
     // Log the setup request
-    state.log_activity(
-        "project_setup",
-        Some("Starting project setup from spuff.yaml".to_string())
-    ).await;
+    state
+        .log_activity(
+            "project_setup",
+            Some("Starting project setup from spuff.yaml".to_string()),
+        )
+        .await;
 
     match state.project_setup.start_setup().await {
-        Ok(()) => {
-            Ok(Json(serde_json::json!({
-                "status": "started",
-                "message": "Project setup started. Poll GET /project/status for progress."
-            })))
-        }
-        Err(e) => {
-            Err((
-                StatusCode::CONFLICT,
-                Json(ApiError::new(e)),
-            ))
-        }
+        Ok(()) => Ok(Json(serde_json::json!({
+            "status": "started",
+            "message": "Project setup started. Poll GET /project/status for progress."
+        }))),
+        Err(e) => Err((StatusCode::CONFLICT, Json(ApiError::new(e)))),
     }
 }
 

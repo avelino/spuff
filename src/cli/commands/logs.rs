@@ -57,6 +57,7 @@ impl LogCategory {
 }
 
 /// Execute the logs command
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     config: &AppConfig,
     bundle: Option<String>,
@@ -80,14 +81,20 @@ pub async fn execute(
             LogCategory::Bundle.log_path(Some(bundle_name), None),
         )
     } else if packages {
-        (LogCategory::Packages, LogCategory::Packages.log_path(None, None))
+        (
+            LogCategory::Packages,
+            LogCategory::Packages.log_path(None, None),
+        )
     } else if repos {
         (
             LogCategory::Repositories,
             LogCategory::Repositories.log_path(None, None),
         )
     } else if services {
-        (LogCategory::Services, LogCategory::Services.log_path(None, None))
+        (
+            LogCategory::Services,
+            LogCategory::Services.log_path(None, None),
+        )
     } else if let Some(idx) = script {
         (
             LogCategory::Script,

@@ -69,11 +69,7 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
                 );
             }
             Err(e) => {
-                println!(
-                    "  {} Snapshot failed: {}",
-                    style("!").yellow().bold(),
-                    e
-                );
+                println!("  {} Snapshot failed: {}", style("!").yellow().bold(), e);
             }
         }
     }

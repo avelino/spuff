@@ -59,14 +59,16 @@ impl SftpClient {
             .map_err(|e| SpuffError::Ssh(format!("Failed to create remote file: {}", e)))?;
 
         // Write content
-        remote_file.write_all(&content).await.map_err(|e| {
-            SpuffError::Ssh(format!("Failed to write to remote file: {}", e))
-        })?;
+        remote_file
+            .write_all(&content)
+            .await
+            .map_err(|e| SpuffError::Ssh(format!("Failed to write to remote file: {}", e)))?;
 
         // Ensure data is flushed
-        remote_file.shutdown().await.map_err(|e| {
-            SpuffError::Ssh(format!("Failed to close remote file: {}", e))
-        })?;
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| SpuffError::Ssh(format!("Failed to close remote file: {}", e)))?;
 
         Ok(())
     }

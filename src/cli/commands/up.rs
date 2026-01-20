@@ -11,7 +11,7 @@ use crate::environment::cloud_init::generate_cloud_init;
 use crate::error::{Result, SpuffError};
 use crate::project_config::ProjectConfig;
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
-use crate::ssh::{is_key_in_agent, key_has_passphrase, is_ssh_agent_running};
+use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
 
@@ -51,16 +51,18 @@ pub async fn execute(
     }
 
     // Load project config from spuff.yaml (if exists)
-    let project_config = ProjectConfig::load_from_cwd()
-        .ok()
-        .flatten();
+    let project_config = ProjectConfig::load_from_cwd().ok().flatten();
 
     // Apply project config overrides (CLI args take precedence)
     let effective_size = size.or_else(|| {
-        project_config.as_ref().and_then(|p| p.resources.size.clone())
+        project_config
+            .as_ref()
+            .and_then(|p| p.resources.size.clone())
     });
     let effective_region = region.or_else(|| {
-        project_config.as_ref().and_then(|p| p.resources.region.clone())
+        project_config
+            .as_ref()
+            .and_then(|p| p.resources.region.clone())
     });
 
     // Pre-flight check: verify SSH key is usable
@@ -83,11 +85,7 @@ pub async fn execute(
                 );
             }
             Err(e) => {
-                println!(
-                    "{} Failed to build agent: {}",
-                    style("✕").red().bold(),
-                    e
-                );
+                println!("{} Failed to build agent: {}", style("✕").red().bold(), e);
                 return Err(e);
             }
         }
@@ -261,19 +259,53 @@ async fn build_linux_agent() -> Result<String> {
     // Determine which build tool to use (in order of preference)
     let (cmd, args): (String, Vec<&str>) = if has_cargo_zigbuild().await {
         // cargo-zigbuild: best option for macOS, no Docker needed
-        (cargo.clone(), vec!["zigbuild", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cargo.clone(),
+            vec![
+                "zigbuild",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     } else if has_cross().await {
         // cross: requires Docker but works well
         let cross_path = if let Ok(home) = std::env::var("HOME") {
             let path = format!("{}/.cargo/bin/cross", home);
-            if std::path::Path::new(&path).exists() { path } else { "cross".to_string() }
+            if std::path::Path::new(&path).exists() {
+                path
+            } else {
+                "cross".to_string()
+            }
         } else {
             "cross".to_string()
         };
-        (cross_path, vec!["build", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cross_path,
+            vec![
+                "build",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     } else {
         // Fallback to cargo (requires linker setup)
-        (cargo.clone(), vec!["build", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cargo.clone(),
+            vec![
+                "build",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     };
 
     println!(
@@ -408,12 +440,17 @@ async fn provision_instance(
     let provider = create_provider(config)?;
 
     // Step 1: Generate cloud-init
-    tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Preparing environment configuration...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_CLOUD_INIT,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Preparing environment configuration...".to_string(),
+    ))
+    .await
+    .ok();
 
     let user_data = generate_cloud_init(config, project_config.as_ref())?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
@@ -424,20 +461,26 @@ async fn provision_instance(
     tx.send(ProgressMessage::SetStep(STEP_CREATE, StepState::InProgress))
         .await
         .ok();
-    tx.send(ProgressMessage::SetDetail("Requesting VM from provider...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Requesting VM from provider...".to_string(),
+    ))
+    .await
+    .ok();
 
     let instance_name = generate_instance_name();
     let instance_region = region.unwrap_or_else(|| config.region.clone());
     let instance_size = size.unwrap_or_else(|| config.size.clone());
     let image = get_image_spec(&config.provider, snapshot);
 
-    let request = InstanceRequest::new(instance_name.clone(), instance_region.clone(), instance_size.clone())
-        .with_image(image)
-        .with_user_data(user_data)
-        .with_label("spuff", "true")
-        .with_label("managed-by", "spuff-cli");
+    let request = InstanceRequest::new(
+        instance_name.clone(),
+        instance_region.clone(),
+        instance_size.clone(),
+    )
+    .with_image(image)
+    .with_user_data(user_data)
+    .with_label("spuff", "true")
+    .with_label("managed-by", "spuff-cli");
 
     let instance = match provider.create_instance(&request).await {
         Ok(i) => i,
@@ -455,12 +498,17 @@ async fn provision_instance(
         .ok();
 
     // Step 3: Wait for instance to be ready
-    tx.send(ProgressMessage::SetStep(STEP_WAIT_READY, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Waiting for VM to be assigned an IP...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_WAIT_READY,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Waiting for VM to be assigned an IP...".to_string(),
+    ))
+    .await
+    .ok();
 
     let instance = match provider.wait_ready(&instance.id).await {
         Ok(i) => i,
@@ -488,12 +536,18 @@ async fn provision_instance(
         .ok();
 
     // Step 4: Wait for SSH
-    tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail(format!("Waiting for SSH port on {}...", instance.ip)))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_WAIT_SSH,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(format!(
+        "Waiting for SSH port on {}...",
+        instance.ip
+    )))
+    .await
+    .ok();
 
     // First wait for SSH port to be open
     if let Err(e) = wait_for_ssh(&instance.ip.to_string(), 22, Duration::from_secs(300)).await {
@@ -505,11 +559,16 @@ async fn provision_instance(
     }
 
     // Then wait for user to exist and SSH login to work
-    tx.send(ProgressMessage::SetDetail(format!("Waiting for user {}...", config.ssh_user)))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetDetail(format!(
+        "Waiting for user {}...",
+        config.ssh_user
+    )))
+    .await
+    .ok();
 
-    if let Err(e) = wait_for_ssh_login(&instance.ip.to_string(), config, Duration::from_secs(120)).await {
+    if let Err(e) =
+        wait_for_ssh_login(&instance.ip.to_string(), config, Duration::from_secs(120)).await
+    {
         tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
             .await
             .ok();
@@ -523,24 +582,35 @@ async fn provision_instance(
 
     // In dev mode, upload local agent binary
     if dev {
-        tx.send(ProgressMessage::SetStep(STEP_UPLOAD_AGENT, StepState::InProgress))
-            .await
-            .ok();
-        tx.send(ProgressMessage::SetDetail("Uploading local spuff-agent...".to_string()))
-            .await
-            .ok();
+        tx.send(ProgressMessage::SetStep(
+            STEP_UPLOAD_AGENT,
+            StepState::InProgress,
+        ))
+        .await
+        .ok();
+        tx.send(ProgressMessage::SetDetail(
+            "Uploading local spuff-agent...".to_string(),
+        ))
+        .await
+        .ok();
 
         let agent_path = get_linux_agent_path();
         let ip_str = instance.ip.to_string();
 
         // Upload the binary
         if let Err(e) = upload_local_agent(&ip_str, config, &agent_path).await {
-            tx.send(ProgressMessage::SetStep(STEP_UPLOAD_AGENT, StepState::Failed))
-                .await
-                .ok();
-            tx.send(ProgressMessage::SetDetail(format!("Agent upload failed: {}", e)))
-                .await
-                .ok();
+            tx.send(ProgressMessage::SetStep(
+                STEP_UPLOAD_AGENT,
+                StepState::Failed,
+            ))
+            .await
+            .ok();
+            tx.send(ProgressMessage::SetDetail(format!(
+                "Agent upload failed: {}",
+                e
+            )))
+            .await
+            .ok();
             // Don't fail the whole process, just warn
             tracing::warn!("Failed to upload local agent: {}", e);
         } else {
@@ -551,9 +621,12 @@ async fn provision_instance(
     }
 
     // Step 5/6: Wait for cloud-init with sub-steps
-    tx.send(ProgressMessage::SetStep(STEP_BOOTSTRAP, StepState::InProgress))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_BOOTSTRAP,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
 
     // Define sub-steps for bootstrap (minimal - devtools installed via agent)
     let sub_steps = vec![
@@ -576,9 +649,11 @@ async fn provision_instance(
         .ok();
 
     // Trigger devtools installation via agent (async, non-blocking)
-    tx.send(ProgressMessage::SetDetail("Triggering devtools installation...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Triggering devtools installation...".to_string(),
+    ))
+    .await
+    .ok();
 
     if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), config).await {
         tracing::warn!("Failed to trigger devtools installation: {}", e);
@@ -641,12 +716,18 @@ async fn wait_for_cloud_init_with_progress(
     let mut agent_done = false;
 
     // Start first sub-step
-    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Updating system packages...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetSubStep(
+        STEP_BOOTSTRAP,
+        SUB_PACKAGES,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Updating system packages...".to_string(),
+    ))
+    .await
+    .ok();
 
     for _ in 0..max_attempts {
         // Check cloud-init log for progress
@@ -657,26 +738,41 @@ async fn wait_for_cloud_init_with_progress(
                 && (log.contains("Setting up") || log.contains("Unpacking"))
             {
                 packages_done = true;
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::Done))
-                    .await
-                    .ok();
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::InProgress))
-                    .await
-                    .ok();
-                tx.send(ProgressMessage::SetDetail("Installing spuff-agent...".to_string()))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_PACKAGES,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_AGENT,
+                    StepState::InProgress,
+                ))
+                .await
+                .ok();
+                tx.send(ProgressMessage::SetDetail(
+                    "Installing spuff-agent...".to_string(),
+                ))
+                .await
+                .ok();
             }
 
             // Check for spuff-agent installation
             if !agent_done
                 && log.contains("spuff-agent")
-                && (log.contains("systemctl enable spuff-agent") || log.contains("systemctl start spuff-agent"))
+                && (log.contains("systemctl enable spuff-agent")
+                    || log.contains("systemctl start spuff-agent"))
             {
                 agent_done = true;
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::Done))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_AGENT,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
                 tx.send(ProgressMessage::SetDetail("Finalizing...".to_string()))
                     .await
                     .ok();
@@ -686,9 +782,13 @@ async fn wait_for_cloud_init_with_progress(
             if log.contains("spuff environment ready") || log.contains("final_message") {
                 // Mark any remaining sub-steps as done
                 for i in 0..2 {
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
-                        .await
-                        .ok();
+                    tx.send(ProgressMessage::SetSubStep(
+                        STEP_BOOTSTRAP,
+                        i,
+                        StepState::Done,
+                    ))
+                    .await
+                    .ok();
                 }
                 return Ok(());
             }
@@ -698,9 +798,13 @@ async fn wait_for_cloud_init_with_progress(
         if let Ok(true) = check_cloud_init_status(ip, config).await {
             // Mark any remaining sub-steps as done
             for i in 0..2 {
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    i,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
             }
             return Ok(());
         }

@@ -246,7 +246,8 @@ impl DevToolsManager {
 
         // Skip tools that aren't configured
         if !config.docker {
-            self.update_tool_status("docker", ToolStatus::Skipped, None).await;
+            self.update_tool_status("docker", ToolStatus::Skipped, None)
+                .await;
         }
         if !config.shell_tools {
             for id in &["fzf", "bat", "eza", "zoxide", "starship"] {
@@ -254,19 +255,24 @@ impl DevToolsManager {
             }
         }
         if !config.nodejs {
-            self.update_tool_status("nodejs", ToolStatus::Skipped, None).await;
+            self.update_tool_status("nodejs", ToolStatus::Skipped, None)
+                .await;
         }
         if !config.claude_code {
-            self.update_tool_status("claude_code", ToolStatus::Skipped, None).await;
+            self.update_tool_status("claude_code", ToolStatus::Skipped, None)
+                .await;
         }
         if config.environment.is_none() {
-            self.update_tool_status("devenv", ToolStatus::Skipped, None).await;
+            self.update_tool_status("devenv", ToolStatus::Skipped, None)
+                .await;
         }
         if config.dotfiles.is_none() {
-            self.update_tool_status("dotfiles", ToolStatus::Skipped, None).await;
+            self.update_tool_status("dotfiles", ToolStatus::Skipped, None)
+                .await;
         }
         if !config.tailscale {
-            self.update_tool_status("tailscale", ToolStatus::Skipped, None).await;
+            self.update_tool_status("tailscale", ToolStatus::Skipped, None)
+                .await;
         }
 
         let state = self.state.clone();
@@ -340,7 +346,8 @@ impl DevToolsInstaller {
                 "devbox" => self.install_devbox().await,
                 "nix" => self.install_nix().await,
                 _ => {
-                    self.update_status("devenv", ToolStatus::Skipped, None).await;
+                    self.update_status("devenv", ToolStatus::Skipped, None)
+                        .await;
                 }
             }
         }
@@ -401,23 +408,35 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("docker", ToolStatus::Installing, None).await;
+            installer
+                .update_status("docker", ToolStatus::Installing, None)
+                .await;
 
-            match installer.run_command("curl -fsSL https://get.docker.com | sh").await {
+            match installer
+                .run_command("curl -fsSL https://get.docker.com | sh")
+                .await
+            {
                 Ok(_) => {
                     // Add user to docker group
-                    let _ = installer.run_command(&format!("usermod -aG docker {}", installer.username)).await;
+                    let _ = installer
+                        .run_command(&format!("usermod -aG docker {}", installer.username))
+                        .await;
 
                     // Get version
-                    let version = installer.run_command("docker --version 2>/dev/null | awk '{print $3}' | tr -d ','")
+                    let version = installer
+                        .run_command("docker --version 2>/dev/null | awk '{print $3}' | tr -d ','")
                         .await
                         .ok();
 
-                    installer.update_status("docker", ToolStatus::Done, version).await;
+                    installer
+                        .update_status("docker", ToolStatus::Done, version)
+                        .await;
                     tracing::info!("Docker installed");
                 }
                 Err(e) => {
-                    installer.update_status("docker", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("docker", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("Docker installation failed: {}", e);
                 }
             }
@@ -435,7 +454,9 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("fzf", ToolStatus::Installing, None).await;
+            installer
+                .update_status("fzf", ToolStatus::Installing, None)
+                .await;
 
             let home = format!("/home/{}", username);
             let cmd = format!(
@@ -451,7 +472,9 @@ impl DevToolsInstaller {
                     tracing::info!("fzf installed");
                 }
                 Err(e) => {
-                    installer.update_status("fzf", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("fzf", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("fzf installation failed: {}", e);
                 }
             }
@@ -468,7 +491,9 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("bat", ToolStatus::Installing, None).await;
+            installer
+                .update_status("bat", ToolStatus::Installing, None)
+                .await;
 
             let cmd = r#"
                 BAT_VERSION="0.24.0"
@@ -480,14 +505,19 @@ impl DevToolsInstaller {
 
             match installer.run_command(cmd).await {
                 Ok(_) => {
-                    let version = installer.run_command("bat --version 2>/dev/null | awk '{print $2}'")
+                    let version = installer
+                        .run_command("bat --version 2>/dev/null | awk '{print $2}'")
                         .await
                         .ok();
-                    installer.update_status("bat", ToolStatus::Done, version).await;
+                    installer
+                        .update_status("bat", ToolStatus::Done, version)
+                        .await;
                     tracing::info!("bat installed");
                 }
                 Err(e) => {
-                    installer.update_status("bat", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("bat", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("bat installation failed: {}", e);
                 }
             }
@@ -504,7 +534,9 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("eza", ToolStatus::Installing, None).await;
+            installer
+                .update_status("eza", ToolStatus::Installing, None)
+                .await;
 
             let cmd = r#"
                 EZA_VERSION="0.20.13"
@@ -523,14 +555,19 @@ impl DevToolsInstaller {
 
             match installer.run_command(cmd).await {
                 Ok(_) => {
-                    let version = installer.run_command("eza --version 2>/dev/null | head -1 | awk '{print $2}'")
+                    let version = installer
+                        .run_command("eza --version 2>/dev/null | head -1 | awk '{print $2}'")
                         .await
                         .ok();
-                    installer.update_status("eza", ToolStatus::Done, version).await;
+                    installer
+                        .update_status("eza", ToolStatus::Done, version)
+                        .await;
                     tracing::info!("eza installed");
                 }
                 Err(e) => {
-                    installer.update_status("eza", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("eza", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("eza installation failed: {}", e);
                 }
             }
@@ -547,7 +584,9 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("zoxide", ToolStatus::Installing, None).await;
+            installer
+                .update_status("zoxide", ToolStatus::Installing, None)
+                .await;
 
             let cmd = r#"
                 curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
@@ -556,14 +595,19 @@ impl DevToolsInstaller {
 
             match installer.run_command(cmd).await {
                 Ok(_) => {
-                    let version = installer.run_command("zoxide --version 2>/dev/null | awk '{print $2}'")
+                    let version = installer
+                        .run_command("zoxide --version 2>/dev/null | awk '{print $2}'")
                         .await
                         .ok();
-                    installer.update_status("zoxide", ToolStatus::Done, version).await;
+                    installer
+                        .update_status("zoxide", ToolStatus::Done, version)
+                        .await;
                     tracing::info!("zoxide installed");
                 }
                 Err(e) => {
-                    installer.update_status("zoxide", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("zoxide", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("zoxide installation failed: {}", e);
                 }
             }
@@ -580,18 +624,28 @@ impl DevToolsInstaller {
                 config: DevToolsConfig::default(),
             };
 
-            installer.update_status("starship", ToolStatus::Installing, None).await;
+            installer
+                .update_status("starship", ToolStatus::Installing, None)
+                .await;
 
-            match installer.run_command("curl -sS https://starship.rs/install.sh | sh -s -- -y").await {
+            match installer
+                .run_command("curl -sS https://starship.rs/install.sh | sh -s -- -y")
+                .await
+            {
                 Ok(_) => {
-                    let version = installer.run_command("starship --version 2>/dev/null | head -1 | awk '{print $2}'")
+                    let version = installer
+                        .run_command("starship --version 2>/dev/null | head -1 | awk '{print $2}'")
                         .await
                         .ok();
-                    installer.update_status("starship", ToolStatus::Done, version).await;
+                    installer
+                        .update_status("starship", ToolStatus::Done, version)
+                        .await;
                     tracing::info!("starship installed");
                 }
                 Err(e) => {
-                    installer.update_status("starship", ToolStatus::Failed(e.clone()), None).await;
+                    installer
+                        .update_status("starship", ToolStatus::Failed(e.clone()), None)
+                        .await;
                     tracing::error!("starship installation failed: {}", e);
                 }
             }
@@ -599,47 +653,59 @@ impl DevToolsInstaller {
     }
 
     async fn install_nodejs(&self) {
-        self.update_status("nodejs", ToolStatus::Installing, None).await;
+        self.update_status("nodejs", ToolStatus::Installing, None)
+            .await;
 
         let cmd = "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs";
 
         match self.run_command(cmd).await {
             Ok(_) => {
-                let version = self.run_command("node --version 2>/dev/null")
+                let version = self
+                    .run_command("node --version 2>/dev/null")
                     .await
                     .ok()
                     .map(|v| v.trim().to_string());
-                self.update_status("nodejs", ToolStatus::Done, version).await;
+                self.update_status("nodejs", ToolStatus::Done, version)
+                    .await;
                 tracing::info!("Node.js installed");
             }
             Err(e) => {
-                self.update_status("nodejs", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("nodejs", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Node.js installation failed: {}", e);
             }
         }
     }
 
     async fn install_claude_code(&self) {
-        self.update_status("claude_code", ToolStatus::Installing, None).await;
+        self.update_status("claude_code", ToolStatus::Installing, None)
+            .await;
 
-        match self.run_command("npm install -g @anthropic-ai/claude-code").await {
+        match self
+            .run_command("npm install -g @anthropic-ai/claude-code")
+            .await
+        {
             Ok(_) => {
-                let version = self.run_command("claude --version 2>/dev/null")
+                let version = self
+                    .run_command("claude --version 2>/dev/null")
                     .await
                     .ok()
                     .map(|v| v.trim().to_string());
-                self.update_status("claude_code", ToolStatus::Done, version).await;
+                self.update_status("claude_code", ToolStatus::Done, version)
+                    .await;
                 tracing::info!("Claude Code installed");
             }
             Err(e) => {
-                self.update_status("claude_code", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("claude_code", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Claude Code installation failed: {}", e);
             }
         }
     }
 
     async fn install_devbox(&self) {
-        self.update_status("devenv", ToolStatus::Installing, None).await;
+        self.update_status("devenv", ToolStatus::Installing, None)
+            .await;
 
         let cmd = format!(
             "curl -fsSL https://get.jetify.com/devbox | bash -s -- -f && \
@@ -649,22 +715,29 @@ impl DevToolsInstaller {
 
         match self.run_command(&cmd).await {
             Ok(_) => {
-                let version = self.run_command(&format!("su - {} -c 'devbox version 2>/dev/null'", self.username))
+                let version = self
+                    .run_command(&format!(
+                        "su - {} -c 'devbox version 2>/dev/null'",
+                        self.username
+                    ))
                     .await
                     .ok()
                     .map(|v| v.trim().to_string());
-                self.update_status("devenv", ToolStatus::Done, version).await;
+                self.update_status("devenv", ToolStatus::Done, version)
+                    .await;
                 tracing::info!("Devbox installed");
             }
             Err(e) => {
-                self.update_status("devenv", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("devenv", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Devbox installation failed: {}", e);
             }
         }
     }
 
     async fn install_nix(&self) {
-        self.update_status("devenv", ToolStatus::Installing, None).await;
+        self.update_status("devenv", ToolStatus::Installing, None)
+            .await;
 
         let cmd = format!(
             "curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install --no-confirm && \
@@ -674,18 +747,21 @@ impl DevToolsInstaller {
 
         match self.run_command(&cmd).await {
             Ok(_) => {
-                self.update_status("devenv", ToolStatus::Done, Some("nix".to_string())).await;
+                self.update_status("devenv", ToolStatus::Done, Some("nix".to_string()))
+                    .await;
                 tracing::info!("Nix installed");
             }
             Err(e) => {
-                self.update_status("devenv", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("devenv", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Nix installation failed: {}", e);
             }
         }
     }
 
     async fn install_dotfiles(&self, url: &str) {
-        self.update_status("dotfiles", ToolStatus::Installing, None).await;
+        self.update_status("dotfiles", ToolStatus::Installing, None)
+            .await;
 
         let cmd = format!(
             "su - {} -c 'git clone {} ~/.dotfiles' && \
@@ -703,14 +779,16 @@ impl DevToolsInstaller {
                 tracing::info!("Dotfiles installed");
             }
             Err(e) => {
-                self.update_status("dotfiles", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("dotfiles", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Dotfiles installation failed: {}", e);
             }
         }
     }
 
     async fn install_tailscale(&self) {
-        self.update_status("tailscale", ToolStatus::Installing, None).await;
+        self.update_status("tailscale", ToolStatus::Installing, None)
+            .await;
 
         let mut cmd = "curl -fsSL https://tailscale.com/install.sh | sh".to_string();
 
@@ -720,15 +798,18 @@ impl DevToolsInstaller {
 
         match self.run_command(&cmd).await {
             Ok(_) => {
-                let version = self.run_command("tailscale --version 2>/dev/null | head -1")
+                let version = self
+                    .run_command("tailscale --version 2>/dev/null | head -1")
                     .await
                     .ok()
                     .map(|v| v.trim().to_string());
-                self.update_status("tailscale", ToolStatus::Done, version).await;
+                self.update_status("tailscale", ToolStatus::Done, version)
+                    .await;
                 tracing::info!("Tailscale installed");
             }
             Err(e) => {
-                self.update_status("tailscale", ToolStatus::Failed(e.clone()), None).await;
+                self.update_status("tailscale", ToolStatus::Failed(e.clone()), None)
+                    .await;
                 tracing::error!("Tailscale installation failed: {}", e);
             }
         }

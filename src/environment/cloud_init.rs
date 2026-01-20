@@ -422,7 +422,10 @@ runcmd:
 final_message: "spuff cloud-init done in $UPTIME seconds - bootstrap running async"
 "#;
 
-pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectConfig>) -> Result<String> {
+pub fn generate_cloud_init(
+    config: &AppConfig,
+    project_config: Option<&ProjectConfig>,
+) -> Result<String> {
     let mut tera = Tera::default();
     tera.add_raw_template("cloud-init", CLOUD_INIT_TEMPLATE)?;
 
@@ -443,9 +446,11 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
 
     // Serialize project config to JSON if present
     let project_config_json = project_config
-        .map(|pc| serde_json::to_string_pretty(pc))
+        .map(serde_json::to_string_pretty)
         .transpose()
-        .map_err(|e| crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e)))?;
+        .map_err(|e| {
+            crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e))
+        })?;
 
     let mut context = Context::new();
     context.insert("username", &config.ssh_user);
@@ -486,7 +491,11 @@ mod tests {
         let pub_key_path = temp_dir.path().join("test_key.pub");
 
         std::fs::write(&key_path, "fake-private-key").unwrap();
-        std::fs::write(&pub_key_path, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... test@example.com").unwrap();
+        std::fs::write(
+            &pub_key_path,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... test@example.com",
+        )
+        .unwrap();
 
         (temp_dir, key_path.to_string_lossy().to_string())
     }
@@ -734,7 +743,10 @@ mod tests {
 
         // Basic YAML validation - should not panic
         let yaml_result: std::result::Result<serde_yaml::Value, _> = serde_yaml::from_str(&result);
-        assert!(yaml_result.is_ok(), "Generated cloud-init should be valid YAML");
+        assert!(
+            yaml_result.is_ok(),
+            "Generated cloud-init should be valid YAML"
+        );
     }
 
     #[test]

@@ -9,7 +9,9 @@ use crate::error::Result;
 #[command(name = "spuff")]
 #[command(version)]
 #[command(about = "Ephemeral dev environments in the cloud")]
-#[command(long_about = "Spin up cloud VMs with your dev environment, auto-destroy when idle.\n\nNo more forgotten instances. No surprise bills.")]
+#[command(
+    long_about = "Spin up cloud VMs with your dev environment, auto-destroy when idle.\n\nNo more forgotten instances. No surprise bills."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -248,7 +250,10 @@ impl Cli {
                 lines,
             } => {
                 let config = AppConfig::load()?;
-                commands::logs::execute(&config, bundle, packages, repos, services, script, follow, lines).await
+                commands::logs::execute(
+                    &config, bundle, packages, repos, services, script, follow, lines,
+                )
+                .await
             }
             Commands::Tunnel { port, stop } => {
                 let config = AppConfig::load()?;
@@ -261,7 +266,9 @@ impl Cli {
                         commands::snapshot::create(&config, name).await
                     }
                     SnapshotCommands::List => commands::snapshot::list(&config).await,
-                    SnapshotCommands::Delete { id } => commands::snapshot::delete(&config, id).await,
+                    SnapshotCommands::Delete { id } => {
+                        commands::snapshot::delete(&config, id).await
+                    }
                 }
             }
             Commands::Config { command } => match command {

@@ -187,11 +187,20 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let s = s.trim().to_lowercase();
 
     if let Some(hours) = s.strip_suffix('h') {
-        hours.parse::<u64>().ok().map(|h| std::time::Duration::from_secs(h * 3600))
+        hours
+            .parse::<u64>()
+            .ok()
+            .map(|h| std::time::Duration::from_secs(h * 3600))
     } else if let Some(minutes) = s.strip_suffix('m') {
-        minutes.parse::<u64>().ok().map(|m| std::time::Duration::from_secs(m * 60))
+        minutes
+            .parse::<u64>()
+            .ok()
+            .map(|m| std::time::Duration::from_secs(m * 60))
     } else if let Some(seconds) = s.strip_suffix('s') {
-        seconds.parse::<u64>().ok().map(std::time::Duration::from_secs)
+        seconds
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
     } else {
         s.parse::<u64>().ok().map(std::time::Duration::from_secs)
     }
@@ -204,27 +213,54 @@ mod tests {
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("2h"), Some(std::time::Duration::from_secs(7200)));
-        assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
-        assert_eq!(parse_duration("24H"), Some(std::time::Duration::from_secs(86400)));
+        assert_eq!(
+            parse_duration("2h"),
+            Some(std::time::Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_duration("1h"),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_duration("24H"),
+            Some(std::time::Duration::from_secs(86400))
+        );
     }
 
     #[test]
     fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("30m"), Some(std::time::Duration::from_secs(1800)));
-        assert_eq!(parse_duration("1m"), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(parse_duration("90M"), Some(std::time::Duration::from_secs(5400)));
+        assert_eq!(
+            parse_duration("30m"),
+            Some(std::time::Duration::from_secs(1800))
+        );
+        assert_eq!(
+            parse_duration("1m"),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_duration("90M"),
+            Some(std::time::Duration::from_secs(5400))
+        );
     }
 
     #[test]
     fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("60s"), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(parse_duration("3600S"), Some(std::time::Duration::from_secs(3600)));
+        assert_eq!(
+            parse_duration("60s"),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_duration("3600S"),
+            Some(std::time::Duration::from_secs(3600))
+        );
     }
 
     #[test]
     fn test_parse_duration_raw_seconds() {
-        assert_eq!(parse_duration("7200"), Some(std::time::Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration("7200"),
+            Some(std::time::Duration::from_secs(7200))
+        );
     }
 
     #[test]
@@ -236,7 +272,10 @@ mod tests {
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration("  2h  "), Some(std::time::Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration("  2h  "),
+            Some(std::time::Duration::from_secs(7200))
+        );
     }
 
     #[test]
@@ -449,6 +488,9 @@ ssh_user: root
         };
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid idle_timeout"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid idle_timeout"));
     }
 }
