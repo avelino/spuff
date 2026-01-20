@@ -2,6 +2,8 @@
 
 spuff supports per-project configuration via a `spuff.yaml` file in your project root. This enables **environment as code** - defining your development environment declaratively alongside your source code.
 
+> **See also:** [Spuff Specification](./spec.md) for the formal specification with validation rules and conformance requirements.
+
 ## Overview
 
 When you run `spuff up` in a directory containing a `spuff.yaml` file, spuff will:
