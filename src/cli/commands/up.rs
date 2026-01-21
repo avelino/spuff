@@ -809,8 +809,12 @@ async fn provision_instance(
                 let mount_point = vol.resolve_mount_point(Some(&instance_name), *base_dir);
                 let source_path = vol.resolve_source(*base_dir);
 
+                // Check if this is a file volume (SSHFS doesn't support mounting files)
+                let is_file = is_file_volume(&source_path, &vol.target);
+
                 tx.send(ProgressMessage::SetDetail(format!(
-                    "Mounting volume {}/{}: {}",
+                    "{} volume {}/{}: {}",
+                    if is_file { "Syncing" } else { "Mounting" },
                     idx + 1,
                     total_volumes,
                     vol.target
@@ -830,10 +834,22 @@ async fn provision_instance(
                     .await
                     {
                         tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
+                    } else if is_file {
+                        // For files, sync counts as success (no SSHFS mount)
+                        mounted_count += 1;
                     }
                 }
 
-                // Mount the volume
+                // Skip SSHFS mount for files (not supported)
+                if is_file {
+                    tracing::debug!(
+                        "Skipping SSHFS mount for file volume: {} (SSHFS only supports directories)",
+                        vol.target
+                    );
+                    continue;
+                }
+
+                // Mount the directory volume
                 match SshfsLocalCommands::mount(
                     &instance.ip.to_string(),
                     &params.config.ssh_user,
@@ -1231,7 +1247,7 @@ async fn trigger_devtools_installation(ip: &str, config: &AppConfig) -> Result<(
     }
 }
 
-/// Sync local directory to VM using rsync
+/// Sync local file or directory to VM using rsync
 async fn sync_to_vm(
     vm_ip: &str,
     ssh_user: &str,
@@ -1241,14 +1257,24 @@ async fn sync_to_vm(
 ) -> Result<()> {
     use tokio::process::Command;
 
+    let local_metadata = std::fs::metadata(local_path).map_err(|e| {
+        SpuffError::Volume(format!(
+            "Failed to get metadata for '{}': {}",
+            local_path, e
+        ))
+    })?;
+
+    let is_file = local_metadata.is_file();
+
     // Build rsync command with SSH options
     let ssh_cmd = format!(
         "ssh -i \"{}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
         ssh_key_path
     );
 
-    // Ensure local path ends with / to sync contents, not the directory itself
-    let local_source = if local_path.ends_with('/') {
+    // For directories: add trailing / to sync contents, not the directory itself
+    // For files: use the path as-is
+    let local_source = if is_file || local_path.ends_with('/') {
         local_path.to_string()
     } else {
         format!("{}/", local_path)
@@ -1256,39 +1282,54 @@ async fn sync_to_vm(
 
     let remote_dest = format!("{}@{}:{}", ssh_user, vm_ip, remote_path);
 
-    // First ensure remote directory exists
-    let mkdir_output = Command::new("ssh")
-        .args([
-            "-i",
-            ssh_key_path,
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            &format!("{}@{}", ssh_user, vm_ip),
-            &format!("mkdir -p \"{}\"", remote_path),
-        ])
-        .output()
-        .await
-        .map_err(|e| SpuffError::Volume(format!("Failed to create remote directory: {}", e)))?;
+    // First ensure remote directory/parent exists
+    let path_to_create = if is_file {
+        // For files, create the parent directory
+        std::path::Path::new(remote_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        remote_path.to_string()
+    };
 
-    if !mkdir_output.status.success() {
-        let stderr = String::from_utf8_lossy(&mkdir_output.stderr);
-        tracing::warn!("Failed to create remote directory: {}", stderr);
+    if !path_to_create.is_empty() && path_to_create != "/" {
+        let mkdir_output = Command::new("ssh")
+            .args([
+                "-i",
+                ssh_key_path,
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                &format!("{}@{}", ssh_user, vm_ip),
+                "--",
+                "mkdir",
+                "-p",
+                &path_to_create,
+            ])
+            .output()
+            .await
+            .map_err(|e| SpuffError::Volume(format!("Failed to create remote directory: {}", e)))?;
+
+        if !mkdir_output.status.success() {
+            let stderr = String::from_utf8_lossy(&mkdir_output.stderr);
+            tracing::warn!("Failed to create remote directory: {}", stderr);
+        }
     }
+
+    // Build rsync args - only use --delete for directories
+    let mut rsync_args = vec!["-avz"];
+    if !is_file {
+        rsync_args.push("--delete");
+    }
+    rsync_args.extend(["-e", &ssh_cmd, &local_source, &remote_dest]);
 
     // Run rsync
     let output = Command::new("rsync")
-        .args([
-            "-avz",
-            "--delete",
-            "-e",
-            &ssh_cmd,
-            &local_source,
-            &remote_dest,
-        ])
+        .args(&rsync_args)
         .output()
         .await
         .map_err(|e| SpuffError::Volume(format!("Failed to execute rsync: {}", e)))?;
@@ -1301,6 +1342,24 @@ async fn sync_to_vm(
         )));
     }
 
-    tracing::info!("Synced {} to {}:{}", local_path, vm_ip, remote_path);
+    tracing::debug!(
+        "Synced {} ({}) to {}:{}",
+        local_path,
+        if is_file { "file" } else { "directory" },
+        vm_ip,
+        remote_path
+    );
     Ok(())
+}
+
+/// Check if a source path is a file (not directory)
+fn is_file_volume(source_path: &str, target: &str) -> bool {
+    if !source_path.is_empty() && std::path::Path::new(source_path).exists() {
+        std::fs::metadata(source_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+    } else {
+        // If no source, check if target looks like a file (has extension and no trailing /)
+        !target.ends_with('/') && std::path::Path::new(target).extension().is_some()
+    }
 }
