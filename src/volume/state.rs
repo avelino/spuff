@@ -1,9 +1,15 @@
 //! Volume mount state tracking
 //!
 //! Defines types for tracking mounted volumes and their status.
+//! Implements file locking and atomic writes for safe concurrent access.
+
+use std::io::{self, ErrorKind};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Result, SpuffError};
 
 /// Handle to a mounted volume
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,31 +153,172 @@ pub struct VolumeState {
     pub mounts: Vec<MountHandle>,
 }
 
+/// File lock guard for VolumeState operations
+/// Automatically releases the lock when dropped
+pub struct VolumeStateLock {
+    _lock_file: std::fs::File,
+    lock_path: PathBuf,
+}
+
+impl Drop for VolumeStateLock {
+    fn drop(&mut self) {
+        // Remove the lock file on drop
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
 impl VolumeState {
-    /// Load state from the default location
-    pub fn load() -> Option<Self> {
-        let state_dir = dirs::data_local_dir()?.join("spuff");
-        let state_file = state_dir.join("volumes.json");
-
-        if !state_file.exists() {
-            return None;
-        }
-
-        let content = std::fs::read_to_string(&state_file).ok()?;
-        serde_json::from_str(&content).ok()
+    /// Get the state directory path
+    fn state_dir() -> Result<PathBuf> {
+        dirs::data_local_dir()
+            .map(|p| p.join("spuff"))
+            .ok_or_else(|| SpuffError::Volume("Could not determine data directory".into()))
     }
 
-    /// Save state to the default location
-    pub fn save(&self) -> std::io::Result<()> {
-        let state_dir = dirs::data_local_dir()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No data dir"))?
-            .join("spuff");
+    /// Get the state file path
+    fn state_file() -> Result<PathBuf> {
+        Ok(Self::state_dir()?.join("volumes.json"))
+    }
 
-        std::fs::create_dir_all(&state_dir)?;
-        let state_file = state_dir.join("volumes.json");
+    /// Get the lock file path
+    fn lock_file_path() -> Result<PathBuf> {
+        Ok(Self::state_dir()?.join("volumes.lock"))
+    }
 
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(state_file, content)
+    /// Acquire an exclusive lock for state operations
+    /// Returns a guard that releases the lock when dropped
+    fn acquire_lock() -> Result<VolumeStateLock> {
+        use std::fs::OpenOptions;
+
+        let state_dir = Self::state_dir()?;
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| SpuffError::Volume(format!("Failed to create state directory: {}", e)))?;
+
+        let lock_path = Self::lock_file_path()?;
+
+        // Try to acquire lock with retries
+        let max_attempts = 10;
+        let retry_delay = std::time::Duration::from_millis(100);
+
+        for attempt in 0..max_attempts {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(file) => {
+                    return Ok(VolumeStateLock {
+                        _lock_file: file,
+                        lock_path,
+                    });
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    // Check if lock file is stale (older than 60 seconds)
+                    if let Ok(metadata) = std::fs::metadata(&lock_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            let age = std::time::SystemTime::now()
+                                .duration_since(modified)
+                                .unwrap_or_default();
+
+                            if age.as_secs() > 60 {
+                                // Stale lock, remove it
+                                tracing::warn!("Removing stale lock file (age: {:?})", age);
+                                let _ = std::fs::remove_file(&lock_path);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if attempt + 1 < max_attempts {
+                        std::thread::sleep(retry_delay);
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    return Err(SpuffError::Volume(format!(
+                        "Failed to acquire state lock: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        Err(SpuffError::Volume(
+            "Failed to acquire state lock after multiple attempts".into(),
+        ))
+    }
+
+    /// Load state from the default location with proper error handling
+    pub fn load() -> Result<Self> {
+        let state_file = Self::state_file()?;
+
+        if !state_file.exists() {
+            return Ok(Self::default());
+        }
+
+        // Acquire lock for reading
+        let _lock = Self::acquire_lock()?;
+
+        let content = std::fs::read_to_string(&state_file)
+            .map_err(|e| SpuffError::Volume(format!("Failed to read state file: {}", e)))?;
+
+        // Handle empty file
+        if content.trim().is_empty() {
+            return Ok(Self::default());
+        }
+
+        serde_json::from_str(&content).map_err(|e| {
+            tracing::warn!("State file corrupted, starting fresh: {}", e);
+            SpuffError::Volume(format!(
+                "State file corrupted ({}). Consider removing {}",
+                e,
+                state_file.display()
+            ))
+        })
+    }
+
+    /// Load state, returning default if any error occurs (legacy behavior)
+    pub fn load_or_default() -> Self {
+        Self::load().unwrap_or_default()
+    }
+
+    /// Save state atomically to the default location
+    ///
+    /// Uses write-to-temp-then-rename pattern for atomicity
+    pub fn save(&self) -> Result<()> {
+        let state_dir = Self::state_dir()?;
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| SpuffError::Volume(format!("Failed to create state directory: {}", e)))?;
+
+        let state_file = Self::state_file()?;
+
+        // Acquire lock for writing
+        let _lock = Self::acquire_lock()?;
+
+        // Write to temporary file first
+        let temp_file = state_dir.join(format!("volumes.{}.tmp", std::process::id()));
+
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| SpuffError::Volume(format!("Failed to serialize state: {}", e)))?;
+
+        // Write content to temp file
+        std::fs::write(&temp_file, &content)
+            .map_err(|e| SpuffError::Volume(format!("Failed to write temp state file: {}", e)))?;
+
+        // Atomically rename temp file to actual state file
+        std::fs::rename(&temp_file, &state_file).map_err(|e| {
+            // Clean up temp file on error
+            let _ = std::fs::remove_file(&temp_file);
+            SpuffError::Volume(format!("Failed to save state file: {}", e))
+        })?;
+
+        tracing::debug!("Saved volume state to {}", state_file.display());
+        Ok(())
+    }
+
+    /// Legacy save that returns io::Result for compatibility
+    pub fn save_io(&self) -> io::Result<()> {
+        self.save().map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// Add a mount handle

@@ -14,7 +14,7 @@ use crate::provider::{create_provider, ImageSpec, InstanceRequest};
 use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
-use crate::volume::{SshfsDriver, SshfsLocalCommands, VolumeState};
+use crate::volume::{get_install_instructions, SshfsDriver, SshfsLocalCommands, VolumeState};
 
 const STEP_CLOUD_INIT: usize = 0;
 const STEP_CREATE: usize = 1;
@@ -129,6 +129,13 @@ pub async fn execute(
 
     // Pre-flight check: verify SSH key is usable
     verify_ssh_key_accessible(config).await?;
+
+    // Pre-flight check: verify SSHFS is available if volumes are configured
+    if let Some(ref pc) = project_config {
+        if !pc.volumes.is_empty() {
+            verify_sshfs_available().await?;
+        }
+    }
 
     // In dev mode, build agent for Linux and upload
     if dev {
@@ -819,14 +826,19 @@ async fn provision_instance(
                         Ok(_) => {
                             mounted_count += 1;
                             // Save to volume state
-                            let mut state = VolumeState::load().unwrap_or_default();
+                            let mut state = VolumeState::load_or_default();
                             let handle =
                                 crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
                                     .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
                                     .with_source(&source_path)
                                     .with_read_only(vol.read_only);
                             state.add_mount(handle);
-                            state.save().ok();
+                            if let Err(e) = state.save() {
+                                tracing::error!(
+                                    "Failed to save volume state: {}. Mount may not persist.",
+                                    e
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("Failed to mount {}: {}", vol.target, e);
@@ -1112,6 +1124,24 @@ async fn verify_ssh_key_accessible(config: &AppConfig) -> Result<()> {
          ssh-add --apple-use-keychain {}",
         config.ssh_key_path, config.ssh_key_path
     )))
+}
+
+/// Verify SSHFS is available before creating a VM.
+///
+/// This is a pre-flight check to fail fast with helpful instructions
+/// rather than creating a VM that won't work as expected.
+async fn verify_sshfs_available() -> Result<()> {
+    let sshfs_installed = SshfsDriver::check_sshfs_installed().await;
+    let fuse_available = SshfsDriver::check_fuse_available().await;
+
+    if !sshfs_installed || !fuse_available {
+        return Err(SpuffError::Volume(format!(
+            "SSHFS is required for volume mounts but is not available.\n\n{}",
+            get_install_instructions()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Upload local spuff-agent binary and ensure the service is running
