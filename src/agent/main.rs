@@ -27,6 +27,7 @@ mod devtools;
 mod metrics;
 mod project_setup;
 mod routes;
+mod volume_manager;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
