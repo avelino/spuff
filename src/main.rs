@@ -9,6 +9,7 @@ mod ssh;
 mod state;
 mod tui;
 pub mod utils;
+pub mod volume;
 
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
