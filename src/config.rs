@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, SpuffError};
 use crate::project_config::AiToolsConfig;
 use crate::provider::ProviderType;
+use crate::volume::VolumeConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -33,6 +34,10 @@ pub struct AppConfig {
     /// This is the user's default preference, can be overridden by project config or CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_tools: Option<AiToolsConfig>,
+    /// Global volume mounts that apply to all instances.
+    /// These are merged with project-specific volumes from spuff.yaml.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeConfig>,
 }
 
 fn default_ssh_user() -> String {
@@ -55,6 +60,7 @@ impl Default for AppConfig {
             tailscale_authkey: None,
             agent_token: None,
             ai_tools: None, // None means use default (all)
+            volumes: Vec::new(),
         }
     }
 }
@@ -315,6 +321,7 @@ mod tests {
             tailscale_authkey: None,
             agent_token: None,
             ai_tools: None,
+            volumes: Vec::new(),
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -327,6 +334,8 @@ mod tests {
         assert!(!yaml.contains("agent_token"));
         // ai_tools should not appear when None
         assert!(!yaml.contains("ai_tools"));
+        // volumes should not appear when empty
+        assert!(!yaml.contains("volumes"));
     }
 
     #[test]
@@ -408,6 +417,7 @@ tailscale_authkey: tskey-xxx
             tailscale_authkey: None,
             agent_token: None,
             ai_tools: None,
+            volumes: Vec::new(),
         };
 
         config.save().unwrap();

@@ -14,7 +14,7 @@ use crate::volume::{
 };
 
 /// List configured and mounted volumes
-pub async fn list(_config: &AppConfig) -> Result<()> {
+pub async fn list(config: &AppConfig) -> Result<()> {
     let db = StateDb::open()?;
     let instance = db
         .get_active_instance()?
@@ -34,71 +34,112 @@ pub async fn list(_config: &AppConfig) -> Result<()> {
     // Get current mount state
     let volume_state = VolumeState::load_or_default();
 
-    match project_config {
-        Some(pc) if !pc.volumes.is_empty() => {
+    // Build merged volume list: global volumes first, then project volumes
+    // Project volumes with same target override global ones
+    let mut merged_volumes: Vec<(&VolumeConfig, Option<&std::path::Path>)> = Vec::new();
+
+    // Add global volumes (no base_dir)
+    for vol in &config.volumes {
+        merged_volumes.push((vol, None));
+    }
+
+    // Add project volumes (with base_dir), overriding globals with same target
+    if let Some(ref pc) = project_config {
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            merged_volumes.retain(|(v, _)| v.target != vol.target);
+            merged_volumes.push((vol, pc.base_dir.as_deref()));
+        }
+    }
+
+    if !merged_volumes.is_empty() {
+        println!(
+            "  {:<30} {:<30} {} {}",
+            style("Remote Path").bold(),
+            style("Local Mount").bold(),
+            style("Status").bold(),
+            style("Source").bold()
+        );
+        println!("  {}", style("─".repeat(85)).dim());
+
+        for (vol, base_dir) in &merged_volumes {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
+            let is_mounted = SshfsLocalCommands::is_mounted(&mount_point).await;
+
+            let status = if is_mounted {
+                style("● mounted").green()
+            } else {
+                style("○ not mounted").dim()
+            };
+
+            let source = if base_dir.is_some() {
+                style("project").cyan()
+            } else {
+                style("global").yellow()
+            };
+
+            let options = if vol.read_only { " (ro)" } else { "" };
+
             println!(
-                "  {:<30} {:<30} {}",
-                style("Remote Path").bold(),
-                style("Local Mount").bold(),
-                style("Status").bold()
+                "  {:<30} {:<30} {}{} {}",
+                truncate(&vol.target, 28),
+                truncate(&mount_point, 28),
+                status,
+                options,
+                source
             );
-            println!("  {}", style("─".repeat(75)).dim());
+        }
 
-            for vol in &pc.volumes {
-                let mount_point =
-                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
-                let is_mounted = SshfsLocalCommands::is_mounted(&mount_point).await;
+        let global_count = config.volumes.len();
+        let project_count = project_config
+            .as_ref()
+            .map(|pc| pc.volumes.len())
+            .unwrap_or(0);
 
-                let status = if is_mounted {
-                    style("● mounted").green()
-                } else {
-                    style("○ not mounted").dim()
-                };
-
-                let options = if vol.read_only { " (ro)" } else { "" };
-
-                println!(
-                    "  {:<30} {:<30} {}{}",
-                    truncate(&vol.target, 28),
-                    truncate(&mount_point, 28),
-                    status,
-                    options
-                );
-            }
-
-            println!();
+        println!();
+        if global_count > 0 {
             println!(
-                "  {} {} configured volume(s)",
+                "  {} {} global volume(s)",
+                style("•").yellow(),
+                global_count
+            );
+        }
+        if project_count > 0 {
+            println!(
+                "  {} {} project volume(s)",
                 style("•").cyan(),
-                pc.volumes.len()
+                project_count
             );
+        }
 
-            let mounted_count = volume_state.mounts.len();
-            if mounted_count > 0 {
-                println!(
-                    "  {} {} currently mounted",
-                    style("•").green(),
-                    mounted_count
-                );
-            }
-        }
-        _ => {
-            println!("  {}", style("No volumes configured in spuff.yaml").dim());
-            println!();
-            println!("  Add volumes to your spuff.yaml:");
-            println!();
-            println!("  {}", style("volumes:").cyan());
+        let mounted_count = volume_state.mounts.len();
+        if mounted_count > 0 {
             println!(
-                "    {}  {}",
-                style("-").dim(),
-                style("target: /home/dev/project").white()
-            );
-            println!(
-                "      {}  {}",
-                style("mount_point:").dim(),
-                style("~/mnt/project").white()
+                "  {} {} currently mounted",
+                style("•").green(),
+                mounted_count
             );
         }
+    } else {
+        println!(
+            "  {}",
+            style("No volumes configured in config.yaml or spuff.yaml").dim()
+        );
+        println!();
+        println!("  Add volumes to your ~/.config/spuff/config.yaml (global):");
+        println!("  or to your project's spuff.yaml (project-specific):");
+        println!();
+        println!("  {}", style("volumes:").cyan());
+        println!(
+            "    {}  {}",
+            style("-").dim(),
+            style("target: /home/dev/project").white()
+        );
+        println!(
+            "      {}  {}",
+            style("mount_point:").dim(),
+            style("~/mnt/project").white()
+        );
     }
 
     println!();
@@ -106,7 +147,7 @@ pub async fn list(_config: &AppConfig) -> Result<()> {
 }
 
 /// Show detailed status of volumes
-pub async fn status(_config: &AppConfig) -> Result<()> {
+pub async fn status(config: &AppConfig) -> Result<()> {
     let db = StateDb::open()?;
     let instance = db
         .get_active_instance()?
@@ -137,59 +178,80 @@ pub async fn status(_config: &AppConfig) -> Result<()> {
     println!("  {} SSHFS installed and ready", style("✓").green().bold());
     println!();
 
-    match project_config {
-        Some(pc) if !pc.volumes.is_empty() => {
-            for vol in &pc.volumes {
-                let mount_point =
-                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
-                let mount_status = SshfsLocalCommands::check_status(&mount_point).await?;
+    // Build merged volume list: global volumes first, then project volumes
+    // Project volumes with same target override global ones
+    let mut merged_volumes: Vec<(&VolumeConfig, Option<&std::path::Path>, bool)> = Vec::new();
 
-                let status_icon = if mount_status.mounted && mount_status.healthy {
-                    style("●").green()
-                } else if mount_status.mounted {
-                    style("●").yellow()
-                } else {
-                    style("○").red()
-                };
+    // Add global volumes (no base_dir, is_global = true)
+    for vol in &config.volumes {
+        merged_volumes.push((vol, None, true));
+    }
 
-                let status_text = if mount_status.mounted && mount_status.healthy {
-                    style("healthy").green()
-                } else if mount_status.mounted {
-                    style("degraded").yellow()
-                } else {
-                    style("not mounted").red()
-                };
+    // Add project volumes (with base_dir), overriding globals with same target
+    if let Some(ref pc) = project_config {
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            merged_volumes.retain(|(v, _, _)| v.target != vol.target);
+            merged_volumes.push((vol, pc.base_dir.as_deref(), false));
+        }
+    }
 
-                println!(
-                    "  {} VM:{} → {}",
-                    status_icon,
-                    style(&vol.target).cyan(),
-                    style(&mount_point).white()
-                );
-                println!(
-                    "    {} {}{}",
-                    style("Status:").dim(),
-                    status_text,
-                    mount_status
-                        .latency_ms
-                        .map(|l| format!(" ({}ms)", l))
-                        .unwrap_or_default()
-                );
+    if !merged_volumes.is_empty() {
+        for (vol, base_dir, is_global) in &merged_volumes {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
+            let mount_status = SshfsLocalCommands::check_status(&mount_point).await?;
 
-                if vol.read_only {
-                    println!("    {} read-only", style("Mode:").dim());
-                }
+            let status_icon = if mount_status.mounted && mount_status.healthy {
+                style("●").green()
+            } else if mount_status.mounted {
+                style("●").yellow()
+            } else {
+                style("○").red()
+            };
 
-                if let Some(ref err) = mount_status.error {
-                    println!("    {} {}", style("Error:").red(), err);
-                }
+            let status_text = if mount_status.mounted && mount_status.healthy {
+                style("healthy").green()
+            } else if mount_status.mounted {
+                style("degraded").yellow()
+            } else {
+                style("not mounted").red()
+            };
 
-                println!();
+            let source_label = if *is_global {
+                style("[global]").yellow()
+            } else {
+                style("[project]").cyan()
+            };
+
+            println!(
+                "  {} VM:{} → {} {}",
+                status_icon,
+                style(&vol.target).cyan(),
+                style(&mount_point).white(),
+                source_label
+            );
+            println!(
+                "    {} {}{}",
+                style("Status:").dim(),
+                status_text,
+                mount_status
+                    .latency_ms
+                    .map(|l| format!(" ({}ms)", l))
+                    .unwrap_or_default()
+            );
+
+            if vol.read_only {
+                println!("    {} read-only", style("Mode:").dim());
             }
+
+            if let Some(ref err) = mount_status.error {
+                println!("    {} {}", style("Error:").red(), err);
+            }
+
+            println!();
         }
-        _ => {
-            println!("  {}", style("No volumes configured").dim());
-        }
+    } else {
+        println!("  {}", style("No volumes configured").dim());
     }
 
     Ok(())
@@ -239,45 +301,63 @@ pub async fn mount(config: &AppConfig, spec: Option<&str>) -> Result<()> {
             .await?;
         }
         None => {
-            // Mount all volumes from project config
+            // Mount all volumes from global config and project config
             let project_config = ProjectConfig::load_from_cwd().ok().flatten();
 
-            match project_config {
-                Some(pc) if !pc.volumes.is_empty() => {
-                    println!(
-                        "  {} {} volume(s)...",
-                        style("Mounting").cyan(),
-                        pc.volumes.len()
-                    );
-                    println!();
+            // Build merged volume list: global volumes first, then project volumes
+            // Project volumes with same target override global ones
+            let mut merged_volumes: Vec<(&VolumeConfig, Option<&std::path::Path>)> = Vec::new();
 
-                    for vol in &pc.volumes {
-                        match mount_single_volume(
-                            &instance.ip,
-                            &config.ssh_user,
-                            &ssh_key_str,
-                            vol,
-                            Some(&instance.name),
-                            pc.base_dir.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(_) => {}
-                            Err(e) => {
-                                println!("  {} {} - {}", style("✕").red().bold(), vol.target, e);
-                            }
+            // Add global volumes (no base_dir)
+            for vol in &config.volumes {
+                merged_volumes.push((vol, None));
+            }
+
+            // Add project volumes (with base_dir), overriding globals with same target
+            if let Some(ref pc) = project_config {
+                for vol in &pc.volumes {
+                    // Remove any global volume with the same target
+                    merged_volumes.retain(|(v, _)| v.target != vol.target);
+                    merged_volumes.push((vol, pc.base_dir.as_deref()));
+                }
+            }
+
+            if !merged_volumes.is_empty() {
+                println!(
+                    "  {} {} volume(s)...",
+                    style("Mounting").cyan(),
+                    merged_volumes.len()
+                );
+                println!();
+
+                for (vol, base_dir) in &merged_volumes {
+                    match mount_single_volume(
+                        &instance.ip,
+                        &config.ssh_user,
+                        &ssh_key_str,
+                        vol,
+                        Some(&instance.name),
+                        *base_dir,
+                    )
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("  {} {} - {}", style("✕").red().bold(), vol.target, e);
                         }
                     }
                 }
-                _ => {
-                    println!("  {}", style("No volumes configured in spuff.yaml").dim());
-                    println!();
-                    println!("  Mount a volume ad-hoc:");
-                    println!(
-                        "    {}",
-                        style("spuff volume mount /home/dev/project:~/mnt/project").cyan()
-                    );
-                }
+            } else {
+                println!(
+                    "  {}",
+                    style("No volumes configured in config.yaml or spuff.yaml").dim()
+                );
+                println!();
+                println!("  Mount a volume ad-hoc:");
+                println!(
+                    "    {}",
+                    style("spuff volume mount /home/dev/project:~/mnt/project").cyan()
+                );
             }
         }
     }
@@ -407,7 +487,7 @@ async fn sync_to_vm(
 }
 
 /// Unmount a volume or all volumes
-pub async fn unmount(_config: &AppConfig, target: Option<String>, all: bool) -> Result<()> {
+pub async fn unmount(config: &AppConfig, target: Option<String>, all: bool) -> Result<()> {
     let db = StateDb::open()?;
     let instance = db
         .get_active_instance()?
@@ -421,18 +501,34 @@ pub async fn unmount(_config: &AppConfig, target: Option<String>, all: bool) -> 
         println!("  {} all volumes...", style("Unmounting").cyan());
 
         let project_config = ProjectConfig::load_from_cwd().ok().flatten();
-        if let Some(pc) = project_config {
+
+        // Build merged volume list: global volumes first, then project volumes
+        let mut merged_volumes: Vec<(&VolumeConfig, Option<&std::path::Path>)> = Vec::new();
+
+        // Add global volumes (no base_dir)
+        for vol in &config.volumes {
+            merged_volumes.push((vol, None));
+        }
+
+        // Add project volumes (with base_dir), overriding globals with same target
+        if let Some(ref pc) = project_config {
             for vol in &pc.volumes {
-                let mount_point =
-                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
-                match SshfsLocalCommands::unmount(&mount_point).await {
-                    Ok(_) => {
-                        state.remove_mount(&mount_point);
-                        println!("  {} {}", style("✓").green().bold(), mount_point);
-                    }
-                    Err(e) => {
-                        println!("  {} {} - {}", style("✕").red().bold(), mount_point, e);
-                    }
+                // Remove any global volume with the same target
+                merged_volumes.retain(|(v, _)| v.target != vol.target);
+                merged_volumes.push((vol, pc.base_dir.as_deref()));
+            }
+        }
+
+        // Unmount all configured volumes
+        for (vol, base_dir) in &merged_volumes {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
+            match SshfsLocalCommands::unmount(&mount_point).await {
+                Ok(_) => {
+                    state.remove_mount(&mount_point);
+                    println!("  {} {}", style("✓").green().bold(), mount_point);
+                }
+                Err(e) => {
+                    println!("  {} {} - {}", style("✕").red().bold(), mount_point, e);
                 }
             }
         }
@@ -501,73 +597,86 @@ pub async fn remount(config: &AppConfig, target: Option<String>) -> Result<()> {
 
     println!();
 
-    match (target, project_config) {
-        (Some(target_path), Some(pc)) => {
-            // Remount specific volume
-            if let Some(vol) = pc.volumes.iter().find(|v| v.target == target_path) {
-                let mount_point =
-                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
+    // Build merged volume list: global volumes first, then project volumes
+    // Project volumes with same target override global ones
+    let mut merged_volumes: Vec<(&VolumeConfig, Option<&std::path::Path>)> = Vec::new();
 
-                println!(
-                    "  {} {}",
-                    style("Remounting").cyan(),
-                    style(&target_path).white()
-                );
+    // Add global volumes (no base_dir)
+    for vol in &config.volumes {
+        merged_volumes.push((vol, None));
+    }
 
-                // Unmount first
-                SshfsLocalCommands::unmount(&mount_point).await.ok();
-
-                // Mount again
-                mount_single_volume(
-                    &instance.ip,
-                    &config.ssh_user,
-                    &ssh_key_str,
-                    vol,
-                    Some(&instance.name),
-                    pc.base_dir.as_deref(),
-                )
-                .await?;
-
-                println!("  {} Volume remounted", style("✓").green().bold());
-            } else {
-                return Err(SpuffError::Volume(format!(
-                    "Volume not found in config: {}",
-                    target_path
-                )));
-            }
+    // Add project volumes (with base_dir), overriding globals with same target
+    if let Some(ref pc) = project_config {
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            merged_volumes.retain(|(v, _)| v.target != vol.target);
+            merged_volumes.push((vol, pc.base_dir.as_deref()));
         }
-        (None, Some(pc)) if !pc.volumes.is_empty() => {
-            // Remount all volumes
-            println!("  {} all volumes...", style("Remounting").cyan());
+    }
 
-            for vol in &pc.volumes {
-                let mount_point =
-                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
+    if let Some(target_path) = target {
+        // Remount specific volume
+        if let Some((vol, base_dir)) = merged_volumes.iter().find(|(v, _)| v.target == target_path)
+        {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
 
-                // Unmount first
-                SshfsLocalCommands::unmount(&mount_point).await.ok();
+            println!(
+                "  {} {}",
+                style("Remounting").cyan(),
+                style(&target_path).white()
+            );
 
-                // Mount again
-                match mount_single_volume(
-                    &instance.ip,
-                    &config.ssh_user,
-                    &ssh_key_str,
-                    vol,
-                    Some(&instance.name),
-                    pc.base_dir.as_deref(),
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        println!("  {} {} - {}", style("✕").red().bold(), vol.target, e);
-                    }
+            // Unmount first
+            SshfsLocalCommands::unmount(&mount_point).await.ok();
+
+            // Mount again
+            mount_single_volume(
+                &instance.ip,
+                &config.ssh_user,
+                &ssh_key_str,
+                vol,
+                Some(&instance.name),
+                *base_dir,
+            )
+            .await?;
+
+            println!("  {} Volume remounted", style("✓").green().bold());
+        } else {
+            return Err(SpuffError::Volume(format!(
+                "Volume not found in config: {}",
+                target_path
+            )));
+        }
+    } else if !merged_volumes.is_empty() {
+        // Remount all volumes
+        println!("  {} all volumes...", style("Remounting").cyan());
+
+        for (vol, base_dir) in &merged_volumes {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
+
+            // Unmount first
+            SshfsLocalCommands::unmount(&mount_point).await.ok();
+
+            // Mount again
+            match mount_single_volume(
+                &instance.ip,
+                &config.ssh_user,
+                &ssh_key_str,
+                vol,
+                Some(&instance.name),
+                *base_dir,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("  {} {} - {}", style("✕").red().bold(), vol.target, e);
                 }
             }
         }
-        _ => {
-            println!("  {}", style("No volumes configured").dim());
-        }
+    } else {
+        println!("  {}", style("No volumes configured").dim());
     }
 
     println!();

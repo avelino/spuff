@@ -131,10 +131,14 @@ pub async fn execute(
     verify_ssh_key_accessible(config).await?;
 
     // Pre-flight check: verify SSHFS is available if volumes are configured
-    if let Some(ref pc) = project_config {
-        if !pc.volumes.is_empty() {
-            verify_sshfs_available().await?;
-        }
+    // Check both global config volumes and project volumes
+    let has_volumes = !config.volumes.is_empty()
+        || project_config
+            .as_ref()
+            .map(|pc| !pc.volumes.is_empty())
+            .unwrap_or(false);
+    if has_volumes {
+        verify_sshfs_available().await?;
     }
 
     // In dev mode, build agent for Linux and upload
@@ -754,6 +758,7 @@ async fn provision_instance(
         .ok();
 
     // Step: Mount volumes (if configured)
+    // Merge global volumes with project volumes (project volumes override global by target)
     tx.send(ProgressMessage::SetStep(
         STEP_VOLUMES,
         StepState::InProgress,
@@ -761,102 +766,112 @@ async fn provision_instance(
     .await
     .ok();
 
+    // Build merged volume list: global volumes first, then project volumes
+    // Project volumes with same target override global ones
+    let mut merged_volumes: Vec<(crate::volume::VolumeConfig, Option<&std::path::Path>)> =
+        Vec::new();
+
+    // Add global volumes (no base_dir)
+    for vol in &params.config.volumes {
+        merged_volumes.push((vol.clone(), None));
+    }
+
+    // Add project volumes (with base_dir), overriding globals with same target
     if let Some(ref pc) = params.project_config {
-        if !pc.volumes.is_empty() {
-            // Check SSHFS availability
-            let sshfs_available = SshfsDriver::check_sshfs_installed().await;
-            let fuse_available = SshfsDriver::check_fuse_available().await;
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            merged_volumes.retain(|(v, _)| v.target != vol.target);
+            merged_volumes.push((vol.clone(), pc.base_dir.as_deref()));
+        }
+    }
 
-            if !sshfs_available || !fuse_available {
-                tx.send(ProgressMessage::SetDetail(
-                    "SSHFS not available - skipping volume mount".to_string(),
-                ))
-                .await
-                .ok();
-                tracing::warn!("SSHFS not available, skipping volume mount");
-            } else {
-                let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
-                    .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
-                let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
+    if !merged_volumes.is_empty() {
+        // Check SSHFS availability
+        let sshfs_available = SshfsDriver::check_sshfs_installed().await;
+        let fuse_available = SshfsDriver::check_fuse_available().await;
 
-                let mut mounted_count = 0;
-                let total_volumes = pc.volumes.len();
+        if !sshfs_available || !fuse_available {
+            tx.send(ProgressMessage::SetDetail(
+                "SSHFS not available - skipping volume mount".to_string(),
+            ))
+            .await
+            .ok();
+            tracing::warn!("SSHFS not available, skipping volume mount");
+        } else {
+            let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
+                .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
+            let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
 
-                for (idx, vol) in pc.volumes.iter().enumerate() {
-                    let mount_point =
-                        vol.resolve_mount_point(Some(&instance_name), pc.base_dir.as_deref());
-                    let source_path = vol.resolve_source(pc.base_dir.as_deref());
+            let mut mounted_count = 0;
+            let total_volumes = merged_volumes.len();
 
-                    tx.send(ProgressMessage::SetDetail(format!(
-                        "Mounting volume {}/{}: {}",
-                        idx + 1,
-                        total_volumes,
-                        vol.target
-                    )))
-                    .await
-                    .ok();
-
-                    // Sync source to VM if defined
-                    if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
-                        if let Err(e) = sync_to_vm(
-                            &instance.ip.to_string(),
-                            &params.config.ssh_user,
-                            &ssh_key_str,
-                            &source_path,
-                            &vol.target,
-                        )
-                        .await
-                        {
-                            tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
-                        }
-                    }
-
-                    // Mount the volume
-                    match SshfsLocalCommands::mount(
-                        &instance.ip.to_string(),
-                        &params.config.ssh_user,
-                        &ssh_key_str,
-                        &vol.target,
-                        &mount_point,
-                        vol.read_only,
-                        &vol.options,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            mounted_count += 1;
-                            // Save to volume state
-                            let mut state = VolumeState::load_or_default();
-                            let handle =
-                                crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
-                                    .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
-                                    .with_source(&source_path)
-                                    .with_read_only(vol.read_only);
-                            state.add_mount(handle);
-                            if let Err(e) = state.save() {
-                                tracing::error!(
-                                    "Failed to save volume state: {}. Mount may not persist.",
-                                    e
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to mount {}: {}", vol.target, e);
-                        }
-                    }
-                }
+            for (idx, (vol, base_dir)) in merged_volumes.iter().enumerate() {
+                let mount_point = vol.resolve_mount_point(Some(&instance_name), *base_dir);
+                let source_path = vol.resolve_source(*base_dir);
 
                 tx.send(ProgressMessage::SetDetail(format!(
-                    "Mounted {}/{} volume(s)",
-                    mounted_count, total_volumes
+                    "Mounting volume {}/{}: {}",
+                    idx + 1,
+                    total_volumes,
+                    vol.target
                 )))
                 .await
                 .ok();
+
+                // Sync source to VM if defined
+                if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
+                    if let Err(e) = sync_to_vm(
+                        &instance.ip.to_string(),
+                        &params.config.ssh_user,
+                        &ssh_key_str,
+                        &source_path,
+                        &vol.target,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
+                    }
+                }
+
+                // Mount the volume
+                match SshfsLocalCommands::mount(
+                    &instance.ip.to_string(),
+                    &params.config.ssh_user,
+                    &ssh_key_str,
+                    &vol.target,
+                    &mount_point,
+                    vol.read_only,
+                    &vol.options,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        mounted_count += 1;
+                        // Save to volume state
+                        let mut state = VolumeState::load_or_default();
+                        let handle =
+                            crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
+                                .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
+                                .with_source(&source_path)
+                                .with_read_only(vol.read_only);
+                        state.add_mount(handle);
+                        if let Err(e) = state.save() {
+                            tracing::error!(
+                                "Failed to save volume state: {}. Mount may not persist.",
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to mount {}: {}", vol.target, e);
+                    }
+                }
             }
-        } else {
-            tx.send(ProgressMessage::SetDetail(
-                "No volumes configured".to_string(),
-            ))
+
+            tx.send(ProgressMessage::SetDetail(format!(
+                "Mounted {}/{} volume(s)",
+                mounted_count, total_volumes
+            )))
             .await
             .ok();
         }
