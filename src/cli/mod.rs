@@ -146,6 +146,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: AiCommands,
     },
+
+    /// Manage volume mounts
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,6 +252,39 @@ pub enum AgentCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum VolumeCommands {
+    /// List configured volumes
+    #[command(name = "ls")]
+    List,
+
+    /// Show detailed volume status
+    Status,
+
+    /// Mount volumes (from config or ad-hoc)
+    Mount {
+        /// Volume spec: remote_path:local_mount or remote_path:local_mount:ro
+        /// If not provided, mounts all volumes from spuff.yaml
+        spec: Option<String>,
+    },
+
+    /// Unmount a volume
+    Unmount {
+        /// Target path to unmount
+        target: Option<String>,
+
+        /// Unmount all volumes
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Remount volumes (useful after connection issues)
+    Remount {
+        /// Specific target to remount (default: all)
+        target: Option<String>,
+    },
+}
+
 impl Cli {
     pub async fn execute(self) -> Result<()> {
         match self.command {
@@ -338,6 +377,22 @@ impl Cli {
                     AiCommands::Status => commands::ai::status(&config).await,
                     AiCommands::Install { tool } => commands::ai::install(&config, tool).await,
                     AiCommands::Info { tool } => commands::ai::info(&tool).await,
+                }
+            }
+            Commands::Volume { command } => {
+                let config = AppConfig::load()?;
+                match command {
+                    VolumeCommands::List => commands::volume::list(&config).await,
+                    VolumeCommands::Status => commands::volume::status(&config).await,
+                    VolumeCommands::Mount { spec } => {
+                        commands::volume::mount(&config, spec.as_deref()).await
+                    }
+                    VolumeCommands::Unmount { target, all } => {
+                        commands::volume::unmount(&config, target, all).await
+                    }
+                    VolumeCommands::Remount { target } => {
+                        commands::volume::remount(&config, target).await
+                    }
                 }
             }
         }
