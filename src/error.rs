@@ -45,6 +45,9 @@ pub enum SpuffError {
     #[error("Dialog error: {0}")]
     Dialog(#[from] dialoguer::Error),
 
+    #[error("Volume error: {0}")]
+    Volume(String),
+
     #[error("SSH protocol error: {0}")]
     SshProtocol(#[from] russh::Error),
 
