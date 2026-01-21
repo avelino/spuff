@@ -39,34 +39,24 @@ We will use **SSH agent forwarding** (`ssh -A`) to provide git SSH access on VMs
 
 ### How It Works
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         User's Machine                                       │
-│                                                                              │
-│  ┌──────────────┐         ┌──────────────────────────────────────────────┐  │
-│  │  SSH Agent   │◄────────│  Private keys stored securely                │  │
-│  │  (ssh-agent) │         │  ~/.ssh/id_ed25519                           │  │
-│  └──────┬───────┘         └──────────────────────────────────────────────┘  │
-│         │                                                                    │
-│         │ Forward via SSH connection (-A flag)                               │
-│         │                                                                    │
-└─────────│────────────────────────────────────────────────────────────────────┘
-          │
-          │ SSH Connection
-          │
-┌─────────▼────────────────────────────────────────────────────────────────────┐
-│                         Cloud VM                                             │
-│                                                                              │
-│  ┌──────────────┐         ┌──────────────────────────────────────────────┐  │
-│  │ SSH_AUTH_SOCK│────────►│  git clone git@github.com:user/repo.git      │  │
-│  │  (socket)    │         │                                              │  │
-│  └──────────────┘         │  Authentication request forwarded to         │  │
-│                           │  user's machine, signed there, returned      │  │
-│                           └──────────────────────────────────────────────┘  │
-│                                                                              │
-│  No private keys stored on VM                                                │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph local["User's Machine"]
+        sshagent["SSH Agent<br/>(ssh-agent)"]
+        keys["Private keys stored securely<br/>~/.ssh/id_ed25519"]
+        keys --> sshagent
+    end
+
+    subgraph vm["Cloud VM"]
+        socket["SSH_AUTH_SOCK<br/>(socket)"]
+        gitclone["git clone git@github.com:user/repo.git<br/><br/>Authentication request forwarded to<br/>user's machine, signed there, returned"]
+        socket --> gitclone
+        note["No private keys stored on VM"]
+    end
+
+    sshagent -->|"Forward via SSH connection (-A flag)"| socket
+
+    style note fill:#f5f5f5,stroke:#ccc,stroke-dasharray: 5 5
 ```
 
 ### Implementation

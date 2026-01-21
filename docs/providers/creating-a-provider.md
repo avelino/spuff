@@ -33,18 +33,23 @@ Before starting, you need:
 
 The system uses two main traits:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     ProviderRegistry                         │
-│                                                              │
-│   HashMap<ProviderType, Arc<dyn ProviderFactory>>           │
-│                                                              │
-│   DigitalOceanFactory ──┐                                   │
-│   HetznerFactory ───────┼──► create_by_name("hetzner")      │
-│   AwsFactory ───────────┘           │                       │
-│                                     ▼                       │
-│                          Box<dyn Provider>                   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph registry["ProviderRegistry"]
+        hashmap["HashMap&lt;ProviderType, Arc&lt;dyn ProviderFactory&gt;&gt;"]
+
+        do_factory["DigitalOceanFactory"]
+        hetzner_factory["HetznerFactory"]
+        aws_factory["AwsFactory"]
+
+        create["create_by_name('hetzner')"]
+        provider["Box&lt;dyn Provider&gt;"]
+
+        do_factory --> create
+        hetzner_factory --> create
+        aws_factory --> create
+        create --> provider
+    end
 ```
 
 **You need to implement:**
