@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::devtools::DevToolsConfig;
 use crate::metrics::get_top_processes;
 use crate::project_setup::ProjectSetupManager;
+use crate::volume_manager::AgentVolumeManager;
 use crate::AppState;
 
 /// Directory where log files can be read from.
@@ -50,6 +51,10 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .route("/project/config", get(project_config))
         .route("/project/status", get(project_status))
         .route("/project/setup", post(project_setup))
+        // Volume management
+        .route("/volumes", get(volumes_list))
+        .route("/volumes/status", get(volumes_status))
+        .route("/volumes/unmount", post(volumes_unmount))
 }
 
 /// Custom extractor that validates authentication before allowing access to state.
@@ -651,6 +656,71 @@ async fn project_setup(
             "message": "Project setup started. Poll GET /project/status for progress."
         }))),
         Err(e) => Err((StatusCode::CONFLICT, Json(ApiError::new(e)))),
+    }
+}
+
+/// GET /volumes - List SSHFS mounted volumes (requires authentication)
+///
+/// Returns all SSHFS mounts currently active on the VM.
+async fn volumes_list(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+
+    let manager = AgentVolumeManager::new();
+    let mounts = manager.list_mounts().await;
+
+    Json(serde_json::json!({
+        "mounts": mounts,
+        "count": mounts.len()
+    }))
+}
+
+/// GET /volumes/status - Get detailed status of all volumes (requires authentication)
+///
+/// Returns status information including accessibility and latency for each mount.
+async fn volumes_status(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+
+    let manager = AgentVolumeManager::new();
+    let statuses = manager.get_status().await;
+
+    let healthy_count = statuses.iter().filter(|s| s.accessible).count();
+
+    Json(serde_json::json!({
+        "volumes": statuses,
+        "total": statuses.len(),
+        "healthy": healthy_count,
+        "unhealthy": statuses.len() - healthy_count
+    }))
+}
+
+/// Request body for the /volumes/unmount endpoint.
+#[derive(Debug, Deserialize)]
+struct UnmountRequest {
+    /// Target path to unmount
+    target: String,
+}
+
+/// POST /volumes/unmount - Unmount a specific volume (requires authentication)
+///
+/// Unmounts the SSHFS volume at the specified target path.
+async fn volumes_unmount(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<UnmountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    state
+        .log_activity("volume_unmount", Some(format!("target={}", req.target)))
+        .await;
+
+    let manager = AgentVolumeManager::new();
+
+    match manager.unmount(&req.target).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Successfully unmounted {}", req.target)
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError::new(e)))),
     }
 }
 
