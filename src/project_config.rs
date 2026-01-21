@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SpuffError};
+use crate::volume::VolumeConfig;
 
 /// Main project configuration loaded from spuff.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,15 @@ pub struct ProjectConfig {
     /// Can be a list of tools, "all", or "none"
     #[serde(default)]
     pub ai_tools: AiToolsConfig,
+
+    /// Volume mounts (local directories mounted on the VM)
+    #[serde(default)]
+    pub volumes: Vec<VolumeConfig>,
+
+    /// Base directory where spuff.yaml is located (not serialized)
+    /// Used to resolve relative paths in the config
+    #[serde(skip)]
+    pub base_dir: Option<PathBuf>,
 }
 
 /// AI tools configuration
@@ -269,6 +279,8 @@ impl Default for ProjectConfig {
             ports: Vec::new(),
             hooks: HooksConfig::default(),
             ai_tools: AiToolsConfig::default(),
+            volumes: Vec::new(),
+            base_dir: None,
         }
     }
 }
@@ -305,6 +317,9 @@ impl ProjectConfig {
 
         let mut config: ProjectConfig = serde_yaml::from_str(&content)
             .map_err(|e| SpuffError::Config(format!("Invalid spuff.yaml: {}", e)))?;
+
+        // Set base directory for resolving relative paths
+        config.base_dir = path.parent().map(|p| p.to_path_buf());
 
         // Load secrets if they exist
         let secrets_path = path.with_file_name("spuff.secrets.yaml");
@@ -710,5 +725,38 @@ ai_tools:
 
         let list = AiToolsConfig::List(vec!["claude-code".to_string()]);
         assert_eq!(list.tools_to_install(), vec!["claude-code"]);
+    }
+
+    #[test]
+    fn test_parse_volumes_config() {
+        let yaml = r#"
+volumes:
+  - source: ./src
+    target: /home/dev/project
+  - source: ~/.config/nvim
+    target: /home/dev/.config/nvim
+    read_only: true
+    options:
+      compression: true
+"#;
+
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.volumes.len(), 2);
+
+        let vol1 = &config.volumes[0];
+        assert_eq!(vol1.source, "./src");
+        assert_eq!(vol1.target, "/home/dev/project");
+        assert!(!vol1.read_only);
+
+        let vol2 = &config.volumes[1];
+        assert_eq!(vol2.source, "~/.config/nvim");
+        assert!(vol2.read_only);
+        assert!(vol2.options.compression);
+    }
+
+    #[test]
+    fn test_default_config_has_empty_volumes() {
+        let config = ProjectConfig::default();
+        assert!(config.volumes.is_empty());
     }
 }
