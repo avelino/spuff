@@ -83,6 +83,14 @@ ports:
   - 8080  # Backend API
   - 5432  # Postgres
 
+# Volume mounts (SSHFS-based bidirectional sync)
+volumes:
+  - source: ./data          # Local directory to sync
+    target: ~/data          # Remote directory on VM
+  - source: ./src
+    target: ~/project/src
+    mount_point: ./src      # Mount remote back to local (bidirectional)
+
 # Lifecycle hooks
 hooks:
   post_up: |
@@ -265,6 +273,67 @@ ports:
 ```
 
 This allows you to work "locally" (browser, IDE) while connected to the remote VM.
+
+---
+
+### `volumes`
+
+Mount remote VM directories locally via SSHFS for bidirectional file editing.
+
+```yaml
+volumes:
+  # Basic: sync local to remote
+  - source: ./data
+    target: ~/data
+
+  # Bidirectional: mount remote over local for real-time editing
+  - source: ./src
+    target: ~/project/src
+    mount_point: ./src    # Optional: mount remote back here
+
+  # With explicit mount point
+  - source: ./config
+    target: /etc/myapp
+    mount_point: ~/.local/share/spuff/mounts/myapp-config
+```
+
+**Fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `source` | Yes | Local directory path (relative to spuff.yaml or absolute) |
+| `target` | Yes | Remote directory path on the VM |
+| `mount_point` | No | Where to mount remote directory locally |
+
+**Mount Point Resolution:**
+
+1. If `mount_point` is specified, use it
+2. If only `source` is specified, mount over `source` for bidirectional editing
+3. Otherwise, auto-generate under `~/.local/share/spuff/mounts/<instance>/<path>`
+
+**Behavior during `spuff up`:**
+
+1. Remote directory is created on the VM
+2. Local `source` is synced to remote `target` via rsync
+3. Remote `target` is mounted locally via SSHFS
+
+**Behavior during `spuff down`:**
+
+1. All mounted volumes are force-unmounted before VM destruction
+2. This prevents SSHFS from hanging when the remote server disappears
+
+**Requirements:**
+
+- macOS: [macFUSE](https://osxfuse.github.io/) and `sshfs` (`brew install macfuse sshfs`)
+- Linux: `fuse` and `sshfs` packages
+
+**CLI Commands:**
+
+```bash
+spuff volume mount              # Mount all configured volumes
+spuff volume unmount            # Unmount all volumes
+spuff volume ls                 # List volume status
+```
 
 ---
 

@@ -4,31 +4,21 @@ The spuff-agent runs on Linux cloud VMs, but you might develop on macOS or Windo
 
 ## Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Development Machine (macOS)                             │
-│                                                                              │
-│   ┌─────────────────┐        ┌─────────────────────────────────────────┐   │
-│   │   Rust Code     │───────►│  cargo zigbuild                         │   │
-│   │   (src/agent/)  │        │  --target x86_64-unknown-linux-gnu      │   │
-│   └─────────────────┘        └─────────────────────────────────────────┘   │
-│                                              │                               │
-│                                              ▼                               │
-│                              ┌─────────────────────────────────────────┐   │
-│                              │  target/x86_64-unknown-linux-gnu/       │   │
-│                              │  release/spuff-agent                    │   │
-│                              │  (Linux ELF binary)                     │   │
-│                              └─────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                               │
-                                               │ SCP/cloud-init
-                                               ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Cloud VM (Linux)                                   │
-│                                                                              │
-│   /opt/spuff/spuff-agent                                                    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph dev["Development Machine (macOS)"]
+        code["Rust Code<br/>(src/agent/)"]
+        zigbuild["cargo zigbuild<br/>--target x86_64-unknown-linux-gnu"]
+        binary["target/x86_64-unknown-linux-gnu/<br/>release/spuff-agent<br/>(Linux ELF binary)"]
+
+        code --> zigbuild --> binary
+    end
+
+    subgraph vm["Cloud VM (Linux)"]
+        agent["/opt/spuff/spuff-agent"]
+    end
+
+    binary -->|"SCP / cloud-init"| agent
 ```
 
 ## Using cargo-zigbuild (Recommended)

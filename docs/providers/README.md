@@ -4,34 +4,32 @@ Spuff uses a provider abstraction layer that enables support for multiple cloud 
 
 ## Overview
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                            spuff CLI                                  │
-│                                                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │                    Provider Registry                             │ │
-│  │                                                                  │ │
-│  │   ProviderFactory ──► create() ──► Box<dyn Provider>            │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│                               │                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │                     Provider Trait                               │ │
-│  │                                                                  │ │
-│  │  create_instance()   destroy_instance()   list_instances()      │ │
-│  │  get_instance()      wait_ready()         create_snapshot()     │ │
-│  │  list_snapshots()    delete_snapshot()    get_ssh_keys()        │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│                               │                                       │
-│         ┌─────────────────────┼─────────────────────┐                │
-│         │                     │                     │                │
-│         ▼                     ▼                     ▼                │
-│  ┌─────────────┐       ┌─────────────┐       ┌─────────────┐        │
-│  │DigitalOcean │       │   Hetzner   │       │     AWS     │        │
-│  │  Provider   │       │  Provider   │       │  Provider   │        │
-│  │   + Factory │       │  + Factory  │       │  + Factory  │        │
-│  └─────────────┘       └─────────────┘       └─────────────┘        │
-│                                                                       │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph cli["spuff CLI"]
+        subgraph registry["Provider Registry"]
+            factory["ProviderFactory"]
+            create["create()"]
+            boxprovider["Box&lt;dyn Provider&gt;"]
+            factory --> create --> boxprovider
+        end
+
+        subgraph trait["Provider Trait"]
+            methods["create_instance()  destroy_instance()  list_instances()<br/>get_instance()  wait_ready()  create_snapshot()<br/>list_snapshots()  delete_snapshot()  get_ssh_keys()"]
+        end
+
+        boxprovider --> trait
+
+        subgraph providers["Implementations"]
+            do["DigitalOcean<br/>Provider + Factory"]
+            hetzner["Hetzner<br/>Provider + Factory"]
+            aws["AWS<br/>Provider + Factory"]
+        end
+
+        trait --> do
+        trait --> hetzner
+        trait --> aws
+    end
 ```
 
 ## Architecture

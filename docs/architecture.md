@@ -13,6 +13,7 @@ This document provides a deep dive into spuff's architecture, protocols, data fl
 - [Agent HTTP API](#agent-http-api)
 - [Cloud-Init Provisioning](#cloud-init-provisioning)
 - [State Management](#state-management)
+- [Volume Management](#volume-management)
 - [Security Model](#security-model)
 
 ---
@@ -21,44 +22,33 @@ This document provides a deep dive into spuff's architecture, protocols, data fl
 
 Spuff is a CLI tool that orchestrates ephemeral development VMs across cloud providers. The system consists of three main runtime components:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              User's Machine                                  │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                           spuff CLI                                   │   │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────────┐  │   │
-│  │  │  Commands  │  │  Provider  │  │    SSH     │  │     State      │  │   │
-│  │  │  (up/down) │  │  Adapter   │  │  Connector │  │   (SQLite)     │  │   │
-│  │  └─────┬──────┘  └──────┬─────┘  └──────┬─────┘  └───────┬────────┘  │   │
-│  └────────│────────────────│───────────────│────────────────│───────────┘   │
-└───────────│────────────────│───────────────│────────────────│───────────────┘
-            │                │               │                │
-            │                │               │                │
-            │    ┌───────────▼───────────┐   │                │
-            │    │   HTTPS (REST API)    │   │    ┌───────────▼───────────┐
-            │    │   api.digitalocean.com│   │    │  ~/.config/spuff/     │
-            │    └───────────┬───────────┘   │    │  └── state.db         │
-            │                │               │    └───────────────────────┘
-            │                │               │
-┌───────────│────────────────│───────────────│────────────────────────────────┐
-│           │     Cloud Provider             │                                 │
-│           │                │               │                                 │
-│           │    ┌───────────▼───────────┐   │                                 │
-│           │    │   Droplet/Instance    │   │                                 │
-│           │    │   (Ubuntu 24.04)      │   │                                 │
-│           │    │                       │◄──┘                                 │
-│           │    │   ┌───────────────┐   │    SSH (TCP :22)                   │
-│           │    │   │  cloud-init   │   │                                     │
-│           │    │   └───────┬───────┘   │                                     │
-│           │    │           │           │                                     │
-│           │    │   ┌───────▼───────┐   │                                     │
-│           │    │   │ spuff-agent   │   │                                     │
-│           │    │   │ (HTTP :7575)  │   │                                     │
-│           │    │   └───────────────┘   │                                     │
-│           │    └───────────────────────┘                                     │
-└───────────│──────────────────────────────────────────────────────────────────┘
-            │
-            └─────► stdout (TUI progress display)
+```mermaid
+flowchart TB
+    subgraph local["User's Machine"]
+        subgraph cli["spuff CLI"]
+            commands["Commands<br/>(up/down)"]
+            provider["Provider<br/>Adapter"]
+            ssh["SSH<br/>Connector"]
+            state["State<br/>(SQLite)"]
+        end
+        statedb[("~/.config/spuff/<br/>state.db")]
+        stdout["stdout<br/>(TUI progress)"]
+    end
+
+    subgraph cloud["Cloud Provider"]
+        api["HTTPS REST API<br/>api.digitalocean.com"]
+        subgraph vm["Droplet/Instance<br/>(Ubuntu 24.04)"]
+            cloudinit["cloud-init"]
+            agent["spuff-agent<br/>(HTTP :7575)"]
+            cloudinit --> agent
+        end
+    end
+
+    commands --> stdout
+    provider --> api
+    api --> vm
+    ssh -->|"SSH (TCP :22)"| vm
+    state --> statedb
 ```
 
 ---
@@ -77,7 +67,7 @@ The main binary that users interact with. Built with:
 
 Key modules:
 
-- `src/cli/commands/` - Command implementations (up, down, ssh, status, etc.)
+- `src/cli/commands/` - Command implementations (up, down, ssh, status, volume, etc.)
 - `src/provider/` - Cloud provider abstraction layer:
   - `mod.rs` - Provider trait and common types (`ProviderInstance`, `InstanceStatus`, `Snapshot`)
   - `config.rs` - Provider-agnostic configuration (`InstanceRequest`, `ImageSpec`, `ProviderTimeouts`, `ProviderType`)
@@ -87,6 +77,10 @@ Key modules:
 - `src/connector/ssh.rs` - SSH/SCP operations
 - `src/environment/cloud_init.rs` - Cloud-init template generation
 - `src/state.rs` - SQLite state management (`LocalInstance`, `StateDb`)
+- `src/volume/` - SSHFS-based volume mounting:
+  - `config.rs` - Volume configuration and path resolution
+  - `drivers/sshfs.rs` - SSHFS mount/unmount operations
+  - `state.rs` - Local mount state tracking
 - `src/tui/` - Terminal UI components
 
 ### Agent (`spuff-agent`)
@@ -136,54 +130,33 @@ Spuff uses three distinct communication protocols:
 
 ### Protocol Flow Diagram
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            spuff up --dev                                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 1. HTTPS POST api.digitalocean.com/v2/droplets                              │
-│    Headers: Authorization: Bearer <token>                                    │
-│    Body: { name, region, size, image, user_data, ssh_keys, tags }           │
-│    Response: { droplet: { id: 123456, status: "new" } }                     │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 2. HTTPS GET api.digitalocean.com/v2/droplets/123456  (polling)             │
-│    Response: { droplet: { status: "active", networks: { v4: [ip] } } }      │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 3. TCP connect to <ip>:22 (wait for SSH port)                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 4. SSH login test: ssh -o BatchMode=yes dev@<ip> echo ok                    │
-│    (retry until cloud-init creates user)                                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 5. [--dev only] SCP upload: spuff-agent → /opt/spuff/spuff-agent            │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 6. SSH commands to monitor cloud-init progress                              │
-│    - tail -200 /var/log/cloud-init-output.log                               │
-│    - cloud-init status --format=json                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 7. Interactive session: mosh (preferred) or ssh -A dev@<ip>                 │
-│    - Uses mosh if installed locally (better latency, roaming support)       │
-│    - Falls back to SSH if mosh not available                                │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant CLI as spuff CLI
+    participant API as DigitalOcean API
+    participant VM as Droplet/VM
+
+    Note over CLI: spuff up --dev
+
+    CLI->>API: 1. POST /v2/droplets<br/>Authorization: Bearer token<br/>Body: {name, region, size, image, user_data}
+    API-->>CLI: {droplet: {id: 123456, status: "new"}}
+
+    loop Polling
+        CLI->>API: 2. GET /v2/droplets/123456
+        API-->>CLI: {status: "active", networks: {v4: [ip]}}
+    end
+
+    CLI->>VM: 3. TCP connect to ip:22<br/>(wait for SSH port)
+
+    loop Retry until user exists
+        CLI->>VM: 4. SSH login test<br/>ssh -o BatchMode=yes dev@ip echo ok
+    end
+
+    CLI->>VM: 5. [--dev] SCP upload<br/>spuff-agent → /opt/spuff/
+
+    CLI->>VM: 6. Monitor cloud-init<br/>tail /var/log/cloud-init-output.log<br/>cloud-init status --format=json
+
+    CLI->>VM: 7. Interactive session<br/>mosh (preferred) or ssh -A dev@ip
 ```
 
 ---
@@ -741,26 +714,190 @@ impl StateDb {
 
 ### Instance Lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Empty: Initial state
+    Empty --> Created: spuff up
+    Created --> Destroyed: spuff down<br/>or timeout
+
+    note right of Created
+        saved to state.db
+    end note
+
+    note right of Destroyed
+        removed from state.db
+    end note
+
+    Destroyed --> [*]
 ```
-                 ┌──────────────┐
-                 │   (empty)    │
-                 └──────┬───────┘
-                        │
-            spuff up    │
-                        ▼
-                 ┌──────────────┐
-                 │   Instance   │  saved to state.db
-                 │   created    │
-                 └──────┬───────┘
-                        │
-          spuff down    │
-          (or timeout)  │
-                        ▼
-                 ┌──────────────┐
-                 │   Instance   │  removed from state.db
-                 │   destroyed  │
-                 └──────────────┘
+
+---
+
+## Volume Management
+
+Located in `src/volume/`.
+
+Spuff provides SSHFS-based volume mounting for bidirectional file synchronization between local machine and remote VM.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph local["User's Machine"]
+        subgraph cli["spuff CLI"]
+            volconfig["Volume<br/>Config"]
+            sshfsdriver["SSHFS<br/>Driver"]
+            volstate["Volume<br/>State"]
+            rsync["rsync<br/>Sync"]
+        end
+
+        subgraph localfs["Local Filesystem"]
+            src["./src"]
+            data["./data"]
+        end
+    end
+
+    subgraph remote["Remote VM"]
+        subgraph remotefs["Remote Filesystem"]
+            remotesrc["~/project/src"]
+            remotedata["~/data"]
+        end
+    end
+
+    volconfig --> sshfsdriver
+    volconfig --> rsync
+    sshfsdriver --> volstate
+
+    data -->|"rsync (initial sync)"| remotedata
+    remotesrc <-->|"SSHFS mount<br/>(bidirectional)"| src
+
+    sshfsdriver <-->|"SSH (TCP :22)"| remotefs
+    rsync -->|"SSH (TCP :22)"| remotefs
 ```
+
+### Components
+
+**VolumeConfig** (`src/volume/config.rs`)
+
+Handles volume configuration parsing and path resolution:
+
+```rust
+pub struct VolumeConfig {
+    pub source: String,        // Local directory path
+    pub target: String,        // Remote directory path on VM
+    pub mount_point: Option<String>, // Where to mount locally (optional)
+}
+
+impl VolumeConfig {
+    // Resolve source path relative to spuff.yaml location
+    pub fn resolve_source(&self, base_dir: Option<&str>) -> String;
+
+    // Resolve mount point with fallback logic:
+    // 1. Explicit mount_point if set
+    // 2. source path for bidirectional editing
+    // 3. Auto-generate under ~/.local/share/spuff/mounts/
+    pub fn resolve_mount_point(&self, instance_name: Option<&str>, base_dir: Option<&str>) -> String;
+}
+```
+
+**SshfsDriver** (`src/volume/drivers/sshfs.rs`)
+
+Manages SSHFS mount/unmount operations:
+
+```rust
+pub struct SshfsDriver {
+    ssh_user: String,
+    ssh_host: String,
+    ssh_key_path: String,
+}
+
+impl SshfsDriver {
+    // Mount remote directory locally via SSHFS
+    pub async fn mount(&self, remote_path: &str, local_path: &str) -> Result<()>;
+
+    // Ensure remote directory exists (creates if needed)
+    pub async fn ensure_remote_dir_exists(&self, remote_path: &str) -> Result<()>;
+}
+
+pub struct SshfsLocalCommands;
+
+impl SshfsLocalCommands {
+    // Check if a path is currently mounted
+    pub async fn is_mounted(mount_point: &str) -> Result<bool>;
+
+    // Unmount with force options for platform-specific handling
+    pub async fn unmount(mount_point: &str) -> Result<()>;
+}
+```
+
+**VolumeState** (`src/volume/state.rs`)
+
+Tracks mounted volumes locally:
+
+```rust
+pub struct VolumeState {
+    pub mounts: Vec<MountInfo>,
+}
+
+pub struct MountInfo {
+    pub mount_point: String,
+    pub remote_path: String,
+    pub instance_name: String,
+    pub mounted_at: DateTime<Utc>,
+}
+```
+
+### Data Flow
+
+**Mount Flow (`spuff up` / `spuff volume mount`):**
+
+```
+1. Load volume configuration from spuff.yaml
+2. For each volume:
+   a. Resolve source path (relative to spuff.yaml)
+   b. Resolve mount point (source path for bidirectional, or auto-generate)
+   c. Create remote directory on VM via SSH
+   d. rsync local source → remote target (initial sync)
+   e. Mount remote target → local mount_point via SSHFS
+   f. Track mount in VolumeState
+```
+
+**Unmount Flow (`spuff down` / `spuff volume unmount`):**
+
+```
+1. Load VolumeState and project config
+2. Collect all mount points to unmount
+3. For each mount point:
+   a. Try standard unmount (umount / fusermount -u)
+   b. If fails, try force unmount:
+      - macOS: umount -f, then diskutil unmount force
+      - Linux: fusermount -uz, then umount -l
+   c. Remove from VolumeState
+4. Proceed with VM destruction (if spuff down)
+```
+
+### Platform-Specific Handling
+
+**macOS:**
+- Requires macFUSE installation
+- Force unmount sequence: `umount -f` → `diskutil unmount force`
+- SSHFS installed via Homebrew: `brew install macfuse sshfs`
+
+**Linux:**
+- Uses native FUSE support
+- Force unmount sequence: `fusermount -uz` → `umount -l` (lazy unmount)
+- SSHFS installed via package manager: `apt install sshfs`
+
+### SSH Wrapper for Paths with Spaces
+
+SSHFS requires special handling for SSH key paths containing spaces. The driver creates a temporary wrapper script:
+
+```bash
+#!/bin/bash
+exec ssh -i "/path/with spaces/key" -o StrictHostKeyChecking=accept-new "$@"
+```
+
+This wrapper is passed to SSHFS via the `-o ssh_command=` option.
 
 ---
 
@@ -786,19 +923,23 @@ impl StateDb {
 
 ### Network Security
 
-```
-Internet                    VM
-   │                        │
-   │    ┌───────────────────┤
-   │    │ Port 22 (SSH)     │  ← Only authenticated access
-   │    └───────────────────┤
-   │    ┌───────────────────┤
-   │    │ UDP 60000-61000   │  ← Mosh (authenticated via SSH handshake)
-   │    └───────────────────┤
-   │    ┌───────────────────┤
-   │    │ Port 7575 (Agent) │  ← localhost only, not exposed
-   │    └───────────────────┤
-   │                        │
+```mermaid
+flowchart LR
+    subgraph internet["Internet"]
+        client["Client"]
+    end
+
+    subgraph vm["VM"]
+        ssh["Port 22<br/>(SSH)"]
+        mosh["UDP 60000-61000<br/>(Mosh)"]
+        agent["Port 7575<br/>(Agent)"]
+    end
+
+    client -->|"Authenticated access"| ssh
+    client -->|"Authenticated via<br/>SSH handshake"| mosh
+    agent -.-|"localhost only<br/>not exposed"| agent
+
+    style agent fill:#f9f,stroke:#333,stroke-dasharray: 5 5
 ```
 
 ### VM Security Hardening
