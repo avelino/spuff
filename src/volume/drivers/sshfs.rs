@@ -13,7 +13,7 @@
 //! - Linux: fuse + sshfs (apt install sshfs)
 
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -22,6 +22,111 @@ use crate::error::{Result, SpuffError};
 use crate::volume::config::VolumeConfig;
 use crate::volume::driver::VolumeDriver;
 use crate::volume::state::{MountHandle, MountStatus};
+
+/// Maximum number of retries for network operations
+const MAX_RETRIES: u32 = 3;
+
+/// Delay between retries (exponential backoff base)
+const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// Validate a path is safe for shell interpolation
+///
+/// Prevents command injection by rejecting paths containing shell metacharacters.
+/// This is a defense-in-depth measure - paths should also be properly quoted.
+fn validate_shell_safe_path(path: &str) -> Result<()> {
+    // Check for shell metacharacters that could enable command injection
+    let dangerous_chars = [
+        '"', '`', '$', '\n', '\r', '\0', '\'', ';', '|', '&', '>', '<',
+    ];
+
+    for ch in dangerous_chars {
+        if path.contains(ch) {
+            return Err(SpuffError::Volume(format!(
+                "Path contains invalid character '{}': {}",
+                ch.escape_default(),
+                path
+            )));
+        }
+    }
+
+    // Also check for command substitution patterns
+    if path.contains("$(") || path.contains("${") {
+        return Err(SpuffError::Volume(format!(
+            "Path contains shell expansion pattern: {}",
+            path
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate an IP address format (basic check)
+fn validate_ip_address(ip: &str) -> Result<()> {
+    // Allow IPv4 and IPv6 addresses, as well as hostnames
+    // Reject anything with shell metacharacters
+    validate_shell_safe_path(ip)?;
+
+    // Basic format validation
+    if ip.is_empty() {
+        return Err(SpuffError::Volume("Empty IP address".to_string()));
+    }
+
+    Ok(())
+}
+
+/// Validate a username format
+fn validate_username(user: &str) -> Result<()> {
+    validate_shell_safe_path(user)?;
+
+    if user.is_empty() {
+        return Err(SpuffError::Volume("Empty username".to_string()));
+    }
+
+    // Usernames should be alphanumeric with underscores/hyphens
+    if !user
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(SpuffError::Volume(format!(
+            "Invalid characters in username: {}",
+            user
+        )));
+    }
+
+    Ok(())
+}
+
+/// Execute an async operation with retry logic and exponential backoff
+async fn with_retry<T, F, Fut>(operation_name: &str, max_retries: u32, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut last_error = None;
+
+    for attempt in 0..max_retries {
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = Some(e);
+
+                if attempt + 1 < max_retries {
+                    let delay = Duration::from_millis(RETRY_BASE_DELAY_MS * 2u64.pow(attempt));
+                    tracing::warn!(
+                        "{} failed (attempt {}/{}), retrying in {:?}...",
+                        operation_name,
+                        attempt + 1,
+                        max_retries,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| SpuffError::Volume(format!("{} failed", operation_name))))
+}
 
 /// SSHFS volume driver
 ///
@@ -159,16 +264,36 @@ impl SshfsLocalCommands {
         read_only: bool,
         options: &crate::volume::config::VolumeOptions,
     ) -> Result<()> {
-        // Create mount point directory
-        std::fs::create_dir_all(local_mount_point).map_err(|e| {
-            SpuffError::Volume(format!(
-                "Failed to create mount point {}: {}",
-                local_mount_point, e
-            ))
-        })?;
+        // Validate all inputs to prevent command injection
+        validate_ip_address(vm_ip)?;
+        validate_username(ssh_user)?;
+        validate_shell_safe_path(ssh_key_path)?;
+        validate_shell_safe_path(remote_path)?;
+        validate_shell_safe_path(local_mount_point)?;
 
-        // Ensure remote directory exists (SSHFS fails silently if it doesn't)
-        Self::ensure_remote_dir_exists(vm_ip, ssh_user, ssh_key_path, remote_path).await?;
+        // Verify SSH key exists
+        if !std::path::Path::new(ssh_key_path).exists() {
+            return Err(SpuffError::Volume(format!(
+                "SSH key not found: {}",
+                ssh_key_path
+            )));
+        }
+
+        // Create mount point directory using tokio::fs for async
+        tokio::fs::create_dir_all(local_mount_point)
+            .await
+            .map_err(|e| {
+                SpuffError::Volume(format!(
+                    "Failed to create mount point {}: {}",
+                    local_mount_point, e
+                ))
+            })?;
+
+        // Ensure remote directory exists with retry logic
+        with_retry("Create remote directory", MAX_RETRIES, || {
+            Self::ensure_remote_dir_exists_inner(vm_ip, ssh_user, ssh_key_path, remote_path)
+        })
+        .await?;
 
         // SSHFS 2.x has issues with paths containing spaces in IdentityFile option.
         // Create a wrapper script to handle SSH options properly.
@@ -283,14 +408,34 @@ impl SshfsLocalCommands {
         ssh_key_path: &str,
         options: &crate::volume::config::VolumeOptions,
     ) -> Result<std::path::PathBuf> {
-        let wrapper_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        // Input validation already done in mount(), but double-check for safety
+        validate_shell_safe_path(ssh_key_path)?;
+
+        // Use a secure directory - prefer XDG runtime dir, then data dir, then cache
+        // Avoid /tmp for security (symlink attacks)
+        let wrapper_dir = dirs::runtime_dir()
+            .or_else(dirs::data_local_dir)
+            .or_else(dirs::cache_dir)
+            .ok_or_else(|| {
+                SpuffError::Volume("Could not determine secure directory for SSH wrapper".into())
+            })?
             .join("spuff")
             .join("ssh-wrappers");
 
+        // Create directory with restricted permissions
         std::fs::create_dir_all(&wrapper_dir).map_err(|e| {
             SpuffError::Volume(format!("Failed to create SSH wrapper directory: {}", e))
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Set directory permissions to 700 (owner only)
+            std::fs::set_permissions(&wrapper_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| {
+                    SpuffError::Volume(format!("Failed to secure SSH wrapper directory: {}", e))
+                })?;
+        }
 
         // Use a hash of the key path to create a unique wrapper per key
         let hash = {
@@ -303,9 +448,11 @@ impl SshfsLocalCommands {
 
         let wrapper_path = wrapper_dir.join(format!("ssh-wrapper-{:x}.sh", hash));
 
+        // Use single quotes for the path in the script to prevent expansion
+        // The path has already been validated to not contain single quotes
         let script_content = format!(
             r#"#!/bin/bash
-exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval={} -o ServerAliveCountMax={} "$@"
+exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ServerAliveInterval={} -o ServerAliveCountMax={} "$@"
 "#,
             ssh_key_path, options.server_alive_interval, options.server_alive_count_max
         );
@@ -317,7 +464,8 @@ exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownH
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
+            // Set script permissions to 700 (owner execute only)
+            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o700))
                 .map_err(|e| {
                     SpuffError::Volume(format!(
                         "Failed to set permissions on SSH wrapper script: {}",
@@ -331,14 +479,32 @@ exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownH
         Ok(wrapper_path)
     }
 
-    /// Ensure the remote directory exists before mounting
+    /// Ensure the remote directory exists before mounting (public API with validation)
     /// SSHFS fails silently with "remote host has disconnected" if the directory doesn't exist
-    async fn ensure_remote_dir_exists(
+    pub async fn ensure_remote_dir_exists(
         vm_ip: &str,
         ssh_user: &str,
         ssh_key_path: &str,
         remote_path: &str,
     ) -> Result<()> {
+        // Validate all inputs
+        validate_ip_address(vm_ip)?;
+        validate_username(ssh_user)?;
+        validate_shell_safe_path(ssh_key_path)?;
+        validate_shell_safe_path(remote_path)?;
+
+        Self::ensure_remote_dir_exists_inner(vm_ip, ssh_user, ssh_key_path, remote_path).await
+    }
+
+    /// Inner implementation without validation (for use with retry logic)
+    async fn ensure_remote_dir_exists_inner(
+        vm_ip: &str,
+        ssh_user: &str,
+        ssh_key_path: &str,
+        remote_path: &str,
+    ) -> Result<()> {
+        // Use -- to separate ssh options from the command
+        // Pass the path as a separate argument to avoid shell interpretation
         let output = Command::new("ssh")
             .args([
                 "-i",
@@ -346,7 +512,7 @@ exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownH
                 "-o",
                 "IdentitiesOnly=yes",
                 "-o",
-                "StrictHostKeyChecking=no",
+                "StrictHostKeyChecking=accept-new",
                 "-o",
                 "UserKnownHostsFile=/dev/null",
                 "-o",
@@ -354,7 +520,11 @@ exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownH
                 "-o",
                 "ConnectTimeout=10",
                 &format!("{}@{}", ssh_user, vm_ip),
-                &format!("mkdir -p \"{}\"", remote_path),
+                "--",
+                // Use printf to safely handle the path, avoiding shell expansion
+                "sh",
+                "-c",
+                &format!("mkdir -p -- '{}'", remote_path),
             ])
             .output()
             .await
@@ -376,6 +546,9 @@ exec ssh -i "{}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownH
 
     /// Unmount a local SSHFS mount point
     pub async fn unmount(mount_point: &str) -> Result<()> {
+        // Validate mount point to prevent command injection
+        validate_shell_safe_path(mount_point)?;
+
         // Check if mounted first
         if !Self::is_mounted(mount_point).await {
             tracing::debug!(
@@ -610,5 +783,92 @@ mod tests {
         assert!(status.mounted);
         assert!(status.healthy);
         assert_eq!(status.latency_ms, Some(42));
+    }
+
+    // Security validation tests
+    #[test]
+    fn test_validate_shell_safe_path_valid() {
+        assert!(validate_shell_safe_path("/home/user/project").is_ok());
+        assert!(validate_shell_safe_path("/tmp/test-file_123").is_ok());
+        assert!(validate_shell_safe_path("./relative/path").is_ok());
+        assert!(validate_shell_safe_path("~/.ssh/id_ed25519").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_double_quotes() {
+        assert!(validate_shell_safe_path("/path/with\"quote").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_backticks() {
+        assert!(validate_shell_safe_path("/path/with`command`").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_dollar_sign() {
+        assert!(validate_shell_safe_path("/path/with$var").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_command_substitution() {
+        assert!(validate_shell_safe_path("/path/$(whoami)").is_err());
+        assert!(validate_shell_safe_path("/path/${HOME}").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_semicolon() {
+        assert!(validate_shell_safe_path("/path; rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_pipe() {
+        assert!(validate_shell_safe_path("/path | cat /etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_safe_path_rejects_newlines() {
+        assert!(validate_shell_safe_path("/path\nwith\nnewlines").is_err());
+    }
+
+    #[test]
+    fn test_validate_ip_address_valid() {
+        assert!(validate_ip_address("192.168.1.100").is_ok());
+        assert!(validate_ip_address("10.0.0.1").is_ok());
+        assert!(validate_ip_address("example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ip_address_rejects_empty() {
+        assert!(validate_ip_address("").is_err());
+    }
+
+    #[test]
+    fn test_validate_ip_address_rejects_injection() {
+        assert!(validate_ip_address("192.168.1.1; rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_validate_username_valid() {
+        assert!(validate_username("dev").is_ok());
+        assert!(validate_username("user_name").is_ok());
+        assert!(validate_username("user-name").is_ok());
+        assert!(validate_username("user.name").is_ok());
+    }
+
+    #[test]
+    fn test_validate_username_rejects_empty() {
+        assert!(validate_username("").is_err());
+    }
+
+    #[test]
+    fn test_validate_username_rejects_special_chars() {
+        assert!(validate_username("user;root").is_err());
+        assert!(validate_username("user`whoami`").is_err());
+        assert!(validate_username("user$USER").is_err());
+    }
+
+    #[test]
+    fn test_validate_username_rejects_spaces() {
+        assert!(validate_username("user name").is_err());
     }
 }

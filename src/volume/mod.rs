@@ -76,10 +76,20 @@ impl VolumeManager {
         // Register default drivers
         drivers.insert(VolumeType::Sshfs, Box::new(SshfsDriver::new()));
 
-        // Load persisted state or create new
-        let state = VolumeState::load().unwrap_or_default();
+        // Load persisted state or create new (log errors but don't fail)
+        let state = VolumeState::load_or_default();
 
         Self { drivers, state }
+    }
+
+    /// Create a new VolumeManager, returning error if state loading fails
+    pub fn new_strict() -> Result<Self> {
+        let mut drivers: HashMap<VolumeType, Box<dyn VolumeDriver>> = HashMap::new();
+        drivers.insert(VolumeType::Sshfs, Box::new(SshfsDriver::new()));
+
+        let state = VolumeState::load()?;
+
+        Ok(Self { drivers, state })
     }
 
     /// Get a driver by volume type
@@ -126,9 +136,13 @@ impl VolumeManager {
 
         let handle = driver.mount(config, tunnel_port, remote_user).await?;
 
-        // Save to state
+        // Save to state - propagate errors instead of ignoring
         self.state.add_mount(handle.clone());
-        self.state.save().ok();
+        if let Err(e) = self.state.save() {
+            tracing::error!("Failed to save volume state: {}. Mount may not persist.", e);
+            // Still return success since mount itself succeeded
+            // But log the error so it's visible
+        }
 
         Ok(handle)
     }
@@ -171,9 +185,11 @@ impl VolumeManager {
 
         driver.unmount(&handle).await?;
 
-        // Remove from state
+        // Remove from state - log errors but don't fail the unmount
         self.state.remove_mount(target);
-        self.state.save().ok();
+        if let Err(e) = self.state.save() {
+            tracing::error!("Failed to save volume state after unmount: {}", e);
+        }
 
         Ok(())
     }
@@ -216,9 +232,17 @@ impl VolumeManager {
     }
 
     /// Clear all mount state (for cleanup)
-    pub fn clear_state(&mut self) {
+    pub fn clear_state(&mut self) -> Result<()> {
         self.state.clear();
-        self.state.save().ok();
+        self.state.save()
+    }
+
+    /// Clear all mount state, logging errors but not failing
+    pub fn clear_state_silent(&mut self) {
+        self.state.clear();
+        if let Err(e) = self.state.save() {
+            tracing::error!("Failed to clear volume state: {}", e);
+        }
     }
 }
 

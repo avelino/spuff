@@ -32,7 +32,7 @@ pub async fn list(_config: &AppConfig) -> Result<()> {
     let project_config = ProjectConfig::load_from_cwd().ok().flatten();
 
     // Get current mount state
-    let volume_state = VolumeState::load().unwrap_or_default();
+    let volume_state = VolumeState::load_or_default();
 
     match project_config {
         Some(pc) if !pc.volumes.is_empty() => {
@@ -339,14 +339,16 @@ async fn mount_single_volume(
     )
     .await?;
 
-    // Save to state
-    let mut state = VolumeState::load().unwrap_or_default();
+    // Save to state - log errors but don't fail the mount
+    let mut state = VolumeState::load_or_default();
     let handle = crate::volume::MountHandle::new("sshfs", &volume.target, &mount_point)
         .with_vm_info(vm_ip, ssh_user)
         .with_source(&source_path)
         .with_read_only(volume.read_only);
     state.add_mount(handle);
-    state.save().ok();
+    if let Err(e) = state.save() {
+        tracing::warn!("Failed to save volume state: {}", e);
+    }
 
     println!("  {} {}", style("✓").green().bold(), mount_point);
 
@@ -413,7 +415,7 @@ pub async fn unmount(_config: &AppConfig, target: Option<String>, all: bool) -> 
 
     println!();
 
-    let mut state = VolumeState::load().unwrap_or_default();
+    let mut state = VolumeState::load_or_default();
 
     if all {
         println!("  {} all volumes...", style("Unmounting").cyan());
@@ -476,7 +478,9 @@ pub async fn unmount(_config: &AppConfig, target: Option<String>, all: bool) -> 
         return Ok(());
     }
 
-    state.save().ok();
+    if let Err(e) = state.save() {
+        tracing::warn!("Failed to save volume state after unmount: {}", e);
+    }
     println!();
     Ok(())
 }

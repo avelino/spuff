@@ -55,7 +55,7 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
     // Unmount any locally mounted volumes BEFORE destroying the instance
     // This prevents SSHFS from hanging when the remote server disappears
     let project_config = ProjectConfig::load_from_cwd().ok().flatten();
-    let mut volume_state = VolumeState::load().unwrap_or_default();
+    let mut volume_state = VolumeState::load_or_default();
 
     // Collect all mount points to unmount
     let mut mount_points_to_unmount: Vec<String> = Vec::new();
@@ -101,9 +101,11 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
             }
         }
 
-        // Clear volume state
+        // Clear volume state - log errors but don't fail the down operation
         volume_state.clear();
-        volume_state.save().ok();
+        if let Err(e) = volume_state.save() {
+            tracing::warn!("Failed to clear volume state: {}", e);
+        }
     }
 
     let provider = create_provider(config)?;
