@@ -112,7 +112,7 @@ where
 
                 if attempt + 1 < max_retries {
                     let delay = Duration::from_millis(RETRY_BASE_DELAY_MS * 2u64.pow(attempt));
-                    tracing::warn!(
+                    tracing::debug!(
                         "{} failed (attempt {}/{}), retrying in {:?}...",
                         operation_name,
                         attempt + 1,
@@ -201,7 +201,7 @@ impl VolumeDriver for SshfsDriver {
         let handle = MountHandle::new(self.name(), &config.target, &mount_point)
             .with_read_only(config.read_only);
 
-        tracing::info!(
+        tracing::debug!(
             "Prepared SSHFS mount: VM:{} -> Local:{}",
             config.target,
             mount_point
@@ -391,7 +391,7 @@ impl SshfsLocalCommands {
             )));
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Mounted {}@{}:{} at {}",
             ssh_user,
             vm_ip,
@@ -503,8 +503,12 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
         ssh_key_path: &str,
         remote_path: &str,
     ) -> Result<()> {
-        // Use -- to separate ssh options from the command
-        // Pass the path as a separate argument to avoid shell interpretation
+        // Skip if path is empty or just root
+        if remote_path.is_empty() || remote_path == "/" {
+            return Ok(());
+        }
+
+        // Use separate arguments to avoid shell quoting issues
         let output = Command::new("ssh")
             .args([
                 "-i",
@@ -521,10 +525,9 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
                 "ConnectTimeout=10",
                 &format!("{}@{}", ssh_user, vm_ip),
                 "--",
-                // Use printf to safely handle the path, avoiding shell expansion
-                "sh",
-                "-c",
-                &format!("mkdir -p -- '{}'", remote_path),
+                "mkdir",
+                "-p",
+                remote_path,
             ])
             .output()
             .await
@@ -568,7 +571,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
                 .map_err(|e| SpuffError::Volume(format!("Failed to execute umount: {}", e)))?;
 
             if output.status.success() {
-                tracing::info!("Unmounted {}", mount_point);
+                tracing::debug!("Unmounted {}", mount_point);
                 return Ok(());
             }
 
@@ -580,7 +583,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
 
             if let Ok(out) = force_output {
                 if out.status.success() {
-                    tracing::info!("Force unmounted {} with umount -f", mount_point);
+                    tracing::debug!("Force unmounted {} with umount -f", mount_point);
                     return Ok(());
                 }
             }
@@ -593,7 +596,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
 
             if let Ok(out) = diskutil_output {
                 if out.status.success() {
-                    tracing::info!("Force unmounted {} with diskutil", mount_point);
+                    tracing::debug!("Force unmounted {} with diskutil", mount_point);
                     return Ok(());
                 }
             }
@@ -615,7 +618,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
                 .map_err(|e| SpuffError::Volume(format!("Failed to execute fusermount: {}", e)))?;
 
             if output.status.success() {
-                tracing::info!("Unmounted {}", mount_point);
+                tracing::debug!("Unmounted {}", mount_point);
                 return Ok(());
             }
 
@@ -627,7 +630,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
 
             if let Ok(out) = lazy_output {
                 if out.status.success() {
-                    tracing::info!("Lazy unmounted {} with fusermount -uz", mount_point);
+                    tracing::debug!("Lazy unmounted {} with fusermount -uz", mount_point);
                     return Ok(());
                 }
             }
@@ -640,7 +643,7 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
 
             if let Ok(out) = umount_lazy {
                 if out.status.success() {
-                    tracing::info!("Lazy unmounted {} with umount -l", mount_point);
+                    tracing::debug!("Lazy unmounted {} with umount -l", mount_point);
                     return Ok(());
                 }
             }
