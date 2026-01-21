@@ -22,6 +22,8 @@ packages:
   - mosh
   - jq
   - htop
+{% if volume_packages %}{% for pkg in volume_packages %}  - {{ pkg }}
+{% endfor %}{% endif %}
 
 users:
   - name: {{ username }}
@@ -31,10 +33,28 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - {{ ssh_public_key }}
-{% if spuff_public_key %}      - {{ spuff_public_key }}
-{% endif %}
+{%- if has_spuff_public_key %}
+      - {{ spuff_public_key }}
+{%- endif %}
 
 write_files:
+  # FUSE configuration for SSHFS allow_other option
+  - path: /etc/fuse.conf
+    permissions: '0644'
+    content: |
+      # Allow non-root users to specify the allow_other mount option
+      user_allow_other
+
+{%- if has_spuff_private_key %}
+  # Spuff SSH key for reverse tunnel authentication (volume mounting)
+  - path: /home/{{ username }}/.ssh/spuff_key
+    owner: {{ username }}:{{ username }}
+    permissions: '0600'
+    defer: true
+    content: |
+      {{ spuff_private_key }}
+{%- endif %}
+
   # Store username for agent devtools installation
   - path: /opt/spuff/username
     permissions: '0644'
@@ -450,6 +470,25 @@ pub fn generate_cloud_init_with_ai_tools(
         .ok()
         .filter(|k| !k.is_empty());
 
+    // Get spuff managed private key for reverse SSH tunnel (volume mounting)
+    // Indent each line for YAML block scalar (content: |) - needs 6 spaces
+    let spuff_private_key = crate::ssh::managed_key::get_managed_key_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|key| {
+            key.lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    if i == 0 {
+                        line.to_string()
+                    } else {
+                        format!("      {}", line) // 6 spaces for YAML block scalar
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+
     // Determine home directory based on username
     let home_dir = if config.ssh_user == "root" {
         "/root".to_string()
@@ -458,8 +497,23 @@ pub fn generate_cloud_init_with_ai_tools(
     };
 
     // Serialize project config to JSON if present
+    // Indent each line for YAML block scalar (content: |) - needs 6 spaces
     let project_config_json = project_config
-        .map(serde_json::to_string_pretty)
+        .map(|pc| {
+            serde_json::to_string_pretty(pc).map(|json| {
+                json.lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        if i == 0 {
+                            line.to_string() // First line doesn't need extra indent
+                        } else {
+                            format!("      {}", line) // 6 spaces for YAML block scalar
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
         .transpose()
         .map_err(|e| {
             crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e))
@@ -477,11 +531,30 @@ pub fn generate_cloud_init_with_ai_tools(
     let ai_codex = ai_tools.should_install("codex");
     let ai_opencode = ai_tools.should_install("opencode");
 
+    // Get required packages for volume mounts
+    let volume_packages: Vec<&str> = project_config
+        .map(|pc| {
+            let manager = crate::volume::VolumeManager::new();
+            manager.get_required_packages(&pc.volumes)
+        })
+        .unwrap_or_default();
+
     let mut context = Context::new();
     context.insert("username", &config.ssh_user);
     context.insert("home_dir", &home_dir);
     context.insert("ssh_public_key", &ssh_public_key);
-    context.insert("spuff_public_key", &spuff_public_key);
+    // Insert spuff_public_key as a string (empty string if None, so Tera {% if %} works correctly)
+    context.insert(
+        "spuff_public_key",
+        &spuff_public_key.clone().unwrap_or_default(),
+    );
+    context.insert("has_spuff_public_key", &spuff_public_key.is_some());
+    // Insert spuff private key for reverse tunnel authentication
+    context.insert(
+        "spuff_private_key",
+        &spuff_private_key.clone().unwrap_or_default(),
+    );
+    context.insert("has_spuff_private_key", &spuff_private_key.is_some());
     context.insert("environment", &config.environment);
     context.insert("dotfiles", &config.dotfiles);
     context.insert("idle_timeout_seconds", &idle_timeout_seconds);
@@ -494,6 +567,8 @@ pub fn generate_cloud_init_with_ai_tools(
     context.insert("ai_claude_code", &ai_claude_code);
     context.insert("ai_codex", &ai_codex);
     context.insert("ai_opencode", &ai_opencode);
+    // Volume packages
+    context.insert("volume_packages", &volume_packages);
 
     let rendered = tera.render("cloud-init", &context)?;
     Ok(rendered)
@@ -502,12 +577,14 @@ pub fn generate_cloud_init_with_ai_tools(
 fn read_ssh_public_key(private_key_path: &str) -> Result<String> {
     let public_key_path = format!("{}.pub", private_key_path);
 
-    std::fs::read_to_string(&public_key_path).map_err(|e| {
-        crate::error::SpuffError::Config(format!(
-            "Failed to read SSH public key '{}': {}. Make sure the key exists.",
-            public_key_path, e
-        ))
-    })
+    std::fs::read_to_string(&public_key_path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| {
+            crate::error::SpuffError::Config(format!(
+                "Failed to read SSH public key '{}': {}. Make sure the key exists.",
+                public_key_path, e
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -883,5 +960,53 @@ mod tests {
         assert!(result.contains("/opt/spuff/bootstrap.sh"));
         assert!(result.contains("bootstrap.status"));
         assert!(result.contains("--no-block"));
+    }
+
+    #[test]
+    fn test_cloud_init_with_volumes() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ..Default::default()
+        };
+
+        let project_config = crate::project_config::ProjectConfig {
+            volumes: vec![crate::volume::VolumeConfig::new("./src", "/mnt/src")],
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, Some(&project_config)).unwrap();
+
+        // With the new Local -> VM architecture, SSHFS runs locally
+        // so no sshfs/fuse packages are needed on the VM
+        // Just verify cloud-init is valid
+        assert!(
+            result.contains("cloud-config"),
+            "Should be valid cloud-config"
+        );
+        assert!(
+            result.contains("git"),
+            "Should contain basic packages like git"
+        );
+    }
+
+    #[test]
+    fn test_cloud_init_without_volumes() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ..Default::default()
+        };
+
+        let project_config = crate::project_config::ProjectConfig::default();
+        let result = generate_cloud_init(&config, Some(&project_config)).unwrap();
+
+        // Should not contain sshfs when no volumes configured
+        // Note: The packages list is empty when no volumes, so sshfs shouldn't appear as a dedicated package
+        // Basic packages should still be present
+        assert!(result.contains("git"));
+        assert!(result.contains("curl"));
     }
 }

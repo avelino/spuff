@@ -14,12 +14,14 @@ use crate::provider::{create_provider, ImageSpec, InstanceRequest};
 use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
+use crate::volume::{SshfsDriver, SshfsLocalCommands, VolumeState};
 
 const STEP_CLOUD_INIT: usize = 0;
 const STEP_CREATE: usize = 1;
 const STEP_WAIT_READY: usize = 2;
 const STEP_WAIT_SSH: usize = 3;
 const STEP_BOOTSTRAP: usize = 4;
+const STEP_VOLUMES: usize = 5;
 
 // Bootstrap sub-steps (indices) - minimal bootstrap, devtools installed via agent
 const SUB_PACKAGES: usize = 0;
@@ -161,6 +163,7 @@ pub async fn execute(
         "Waiting for instance".to_string(),
         "Waiting for SSH".to_string(),
         "Running bootstrap".to_string(),
+        "Mounting volumes".to_string(),
     ];
 
     if dev {
@@ -234,7 +237,7 @@ pub async fn execute(
     Ok(())
 }
 
-const STEP_UPLOAD_AGENT: usize = 5;
+const STEP_UPLOAD_AGENT: usize = 6;
 
 /// Linux x86_64 target for cross-compilation (musl for static linking)
 const LINUX_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -469,6 +472,17 @@ fn print_project_summary(project_config: &ProjectConfig) {
             "  {}  {:<56} {}",
             style("│").dim(),
             format!("Setup scripts: {} commands", count),
+            style("│").dim()
+        );
+    }
+
+    // Show volumes if configured
+    if !project_config.volumes.is_empty() {
+        let count = project_config.volumes.len();
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Volumes: {} mount(s)", count),
             style("│").dim()
         );
     }
@@ -729,6 +743,120 @@ async fn provision_instance(
     }
 
     tx.send(ProgressMessage::SetStep(STEP_BOOTSTRAP, StepState::Done))
+        .await
+        .ok();
+
+    // Step: Mount volumes (if configured)
+    tx.send(ProgressMessage::SetStep(
+        STEP_VOLUMES,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+
+    if let Some(ref pc) = params.project_config {
+        if !pc.volumes.is_empty() {
+            // Check SSHFS availability
+            let sshfs_available = SshfsDriver::check_sshfs_installed().await;
+            let fuse_available = SshfsDriver::check_fuse_available().await;
+
+            if !sshfs_available || !fuse_available {
+                tx.send(ProgressMessage::SetDetail(
+                    "SSHFS not available - skipping volume mount".to_string(),
+                ))
+                .await
+                .ok();
+                tracing::warn!("SSHFS not available, skipping volume mount");
+            } else {
+                let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
+                    .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
+                let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
+
+                let mut mounted_count = 0;
+                let total_volumes = pc.volumes.len();
+
+                for (idx, vol) in pc.volumes.iter().enumerate() {
+                    let mount_point =
+                        vol.resolve_mount_point(Some(&instance_name), pc.base_dir.as_deref());
+                    let source_path = vol.resolve_source(pc.base_dir.as_deref());
+
+                    tx.send(ProgressMessage::SetDetail(format!(
+                        "Mounting volume {}/{}: {}",
+                        idx + 1,
+                        total_volumes,
+                        vol.target
+                    )))
+                    .await
+                    .ok();
+
+                    // Sync source to VM if defined
+                    if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
+                        if let Err(e) = sync_to_vm(
+                            &instance.ip.to_string(),
+                            &params.config.ssh_user,
+                            &ssh_key_str,
+                            &source_path,
+                            &vol.target,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
+                        }
+                    }
+
+                    // Mount the volume
+                    match SshfsLocalCommands::mount(
+                        &instance.ip.to_string(),
+                        &params.config.ssh_user,
+                        &ssh_key_str,
+                        &vol.target,
+                        &mount_point,
+                        vol.read_only,
+                        &vol.options,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            mounted_count += 1;
+                            // Save to volume state
+                            let mut state = VolumeState::load().unwrap_or_default();
+                            let handle =
+                                crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
+                                    .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
+                                    .with_source(&source_path)
+                                    .with_read_only(vol.read_only);
+                            state.add_mount(handle);
+                            state.save().ok();
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to mount {}: {}", vol.target, e);
+                        }
+                    }
+                }
+
+                tx.send(ProgressMessage::SetDetail(format!(
+                    "Mounted {}/{} volume(s)",
+                    mounted_count, total_volumes
+                )))
+                .await
+                .ok();
+            }
+        } else {
+            tx.send(ProgressMessage::SetDetail(
+                "No volumes configured".to_string(),
+            ))
+            .await
+            .ok();
+        }
+    } else {
+        tx.send(ProgressMessage::SetDetail(
+            "No volumes configured".to_string(),
+        ))
+        .await
+        .ok();
+    }
+
+    tx.send(ProgressMessage::SetStep(STEP_VOLUMES, StepState::Done))
         .await
         .ok();
 
@@ -1056,4 +1184,78 @@ async fn trigger_devtools_installation(ip: &str, config: &AppConfig) -> Result<(
         // Don't fail even if the response is unexpected
         Ok(())
     }
+}
+
+/// Sync local directory to VM using rsync
+async fn sync_to_vm(
+    vm_ip: &str,
+    ssh_user: &str,
+    ssh_key_path: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    // Build rsync command with SSH options
+    let ssh_cmd = format!(
+        "ssh -i \"{}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+        ssh_key_path
+    );
+
+    // Ensure local path ends with / to sync contents, not the directory itself
+    let local_source = if local_path.ends_with('/') {
+        local_path.to_string()
+    } else {
+        format!("{}/", local_path)
+    };
+
+    let remote_dest = format!("{}@{}:{}", ssh_user, vm_ip, remote_path);
+
+    // First ensure remote directory exists
+    let mkdir_output = Command::new("ssh")
+        .args([
+            "-i",
+            ssh_key_path,
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            &format!("{}@{}", ssh_user, vm_ip),
+            &format!("mkdir -p \"{}\"", remote_path),
+        ])
+        .output()
+        .await
+        .map_err(|e| SpuffError::Volume(format!("Failed to create remote directory: {}", e)))?;
+
+    if !mkdir_output.status.success() {
+        let stderr = String::from_utf8_lossy(&mkdir_output.stderr);
+        tracing::warn!("Failed to create remote directory: {}", stderr);
+    }
+
+    // Run rsync
+    let output = Command::new("rsync")
+        .args([
+            "-avz",
+            "--delete",
+            "-e",
+            &ssh_cmd,
+            &local_source,
+            &remote_dest,
+        ])
+        .output()
+        .await
+        .map_err(|e| SpuffError::Volume(format!("Failed to execute rsync: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(SpuffError::Volume(format!(
+            "Failed to sync to VM: {}",
+            stderr
+        )));
+    }
+
+    tracing::info!("Synced {} to {}:{}", local_path, vm_ip, remote_path);
+    Ok(())
 }
