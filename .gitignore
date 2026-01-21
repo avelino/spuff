@@ -32,3 +32,5 @@ copilot-*
 
 # project
 spuff.yaml
+data/
+data-*/
