@@ -35,7 +35,7 @@ This state is needed for:
 
 ## Decision
 
-We will use **SQLite** for local state management, stored at `~/.config/spuff/state.db`.
+We will use **SQLite** for local state management, stored at `~/.spuff/state.db`.
 
 ### Schema
 
@@ -110,7 +110,7 @@ impl StateDb {
 
 ### Alternative 1: JSON File
 
-Store state in a JSON file at `~/.config/spuff/state.json`.
+Store state in a JSON file at `~/.spuff/state.json`.
 
 **Pros:**
 

@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-spuff currently uses a global configuration file (`~/.config/spuff/config.yaml`) for all environments. While this works for basic usage, teams and projects often need:
+spuff currently uses a global configuration file (`~/.spuff/config.yaml`) for all environments. While this works for basic usage, teams and projects often need:
 
 1. **Reproducible environments** - Every developer should get the same setup
 2. **Project-specific tooling** - Different projects need different language stacks

@@ -3,11 +3,14 @@
 //! Commands for mounting and managing volumes.
 //! Mounts remote VM directories locally using SSHFS.
 
+use std::path::PathBuf;
+
 use console::style;
 
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
 use crate::project_config::ProjectConfig;
+use crate::ssh::{SshClient, SshConfig};
 use crate::state::StateDb;
 use crate::volume::{
     get_install_instructions, SshfsDriver, SshfsLocalCommands, VolumeConfig, VolumeState,
@@ -126,7 +129,7 @@ pub async fn list(config: &AppConfig) -> Result<()> {
             style("No volumes configured in config.yaml or spuff.yaml").dim()
         );
         println!();
-        println!("  Add volumes to your ~/.config/spuff/config.yaml (global):");
+        println!("  Add volumes to your ~/.spuff/config.yaml (global):");
         println!("  or to your project's spuff.yaml (project-specific):");
         println!();
         println!("  {}", style("volumes:").cyan());
@@ -199,22 +202,18 @@ pub async fn status(config: &AppConfig) -> Result<()> {
     if !merged_volumes.is_empty() {
         for (vol, base_dir, is_global) in &merged_volumes {
             let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
-            let mount_status = SshfsLocalCommands::check_status(&mount_point).await?;
+            let source_path = vol.resolve_source(*base_dir);
 
-            let status_icon = if mount_status.mounted && mount_status.healthy {
-                style("●").green()
-            } else if mount_status.mounted {
-                style("●").yellow()
+            // Determine if this is a file (same logic as mount_single_volume)
+            let is_file = if !source_path.is_empty() && std::path::Path::new(&source_path).exists()
+            {
+                std::fs::metadata(&source_path)
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
             } else {
-                style("○").red()
-            };
-
-            let status_text = if mount_status.mounted && mount_status.healthy {
-                style("healthy").green()
-            } else if mount_status.mounted {
-                style("degraded").yellow()
-            } else {
-                style("not mounted").red()
+                // If no source, check if target looks like a file (has extension and no trailing /)
+                let target = &vol.target;
+                !target.ends_with('/') && std::path::Path::new(target).extension().is_some()
             };
 
             let source_label = if *is_global {
@@ -223,29 +222,74 @@ pub async fn status(config: &AppConfig) -> Result<()> {
                 style("[project]").cyan()
             };
 
-            println!(
-                "  {} VM:{} → {} {}",
-                status_icon,
-                style(&vol.target).cyan(),
-                style(&mount_point).white(),
-                source_label
-            );
-            println!(
-                "    {} {}{}",
-                style("Status:").dim(),
-                status_text,
-                mount_status
-                    .latency_ms
-                    .map(|l| format!(" ({}ms)", l))
-                    .unwrap_or_default()
-            );
+            if is_file {
+                // For files, check if the local source exists (was synced)
+                let source_exists =
+                    !source_path.is_empty() && std::path::Path::new(&source_path).exists();
+
+                let (status_icon, status_text) = if source_exists {
+                    (style("✓").green(), style("synced (file)").green())
+                } else {
+                    (style("○").dim(), style("no local source").dim())
+                };
+
+                println!(
+                    "  {} VM:{} ← {} {}",
+                    status_icon,
+                    style(&vol.target).cyan(),
+                    style(&source_path).white(),
+                    source_label
+                );
+                println!(
+                    "    {} {} {}",
+                    style("Status:").dim(),
+                    status_text,
+                    style("(SSHFS doesn't mount files)").dim()
+                );
+            } else {
+                // For directories, check SSHFS mount status
+                let mount_status = SshfsLocalCommands::check_status(&mount_point).await?;
+
+                let status_icon = if mount_status.mounted && mount_status.healthy {
+                    style("●").green()
+                } else if mount_status.mounted {
+                    style("●").yellow()
+                } else {
+                    style("○").red()
+                };
+
+                let status_text = if mount_status.mounted && mount_status.healthy {
+                    style("healthy").green()
+                } else if mount_status.mounted {
+                    style("degraded").yellow()
+                } else {
+                    style("not mounted").red()
+                };
+
+                println!(
+                    "  {} VM:{} → {} {}",
+                    status_icon,
+                    style(&vol.target).cyan(),
+                    style(&mount_point).white(),
+                    source_label
+                );
+                println!(
+                    "    {} {}{}",
+                    style("Status:").dim(),
+                    status_text,
+                    mount_status
+                        .latency_ms
+                        .map(|l| format!(" ({}ms)", l))
+                        .unwrap_or_default()
+                );
+
+                if let Some(ref err) = mount_status.error {
+                    println!("    {} {}", style("Error:").red(), err);
+                }
+            }
 
             if vol.read_only {
                 println!("    {} read-only", style("Mode:").dim());
-            }
-
-            if let Some(ref err) = mount_status.error {
-                println!("    {} {}", style("Error:").red(), err);
             }
 
             println!();
@@ -566,8 +610,6 @@ async fn ensure_remote_path_exists(
     remote_path: &str,
     is_directory: bool,
 ) -> Result<()> {
-    use tokio::process::Command;
-
     let path_to_create = if is_directory {
         remote_path.to_string()
     } else {
@@ -582,35 +624,22 @@ async fn ensure_remote_path_exists(
         return Ok(());
     }
 
-    let output = Command::new("ssh")
-        .args([
-            "-i",
-            ssh_key_path,
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("{}@{}", ssh_user, vm_ip),
-            "--",
-            "mkdir",
-            "-p",
-            &path_to_create,
-        ])
-        .output()
+    // Use internal SSH implementation
+    let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+    let client = SshClient::connect(vm_ip, 22, &config)
+        .await
+        .map_err(|e| SpuffError::Volume(format!("Failed to connect via SSH: {}", e)))?;
+
+    let command = format!("mkdir -p '{}'", path_to_create.replace('\'', "'\\''"));
+    let output = client
+        .exec(&command)
         .await
         .map_err(|e| SpuffError::Volume(format!("Failed to create remote path via SSH: {}", e)))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.success {
         return Err(SpuffError::Volume(format!(
             "Failed to create remote path '{}': {}",
-            path_to_create, stderr
+            path_to_create, output.stderr
         )));
     }
 

@@ -167,7 +167,7 @@ curl -X GET \
 
 ```bash
 # Open database
-sqlite3 ~/.config/spuff/state.db
+sqlite3 ~/.spuff/state.db
 
 # List tables
 .tables
@@ -188,7 +188,7 @@ SELECT * FROM instances;
 
 ```bash
 # Delete state database
-rm ~/.config/spuff/state.db
+rm ~/.spuff/state.db
 
 # Spuff will recreate on next run
 ```
@@ -309,7 +309,7 @@ State may be out of sync:
 
 ```bash
 # Check local state
-sqlite3 ~/.config/spuff/state.db "SELECT * FROM instances;"
+sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
 
 # Check provider
 curl -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
@@ -362,10 +362,10 @@ heaptrack_gui heaptrack.spuff.*.gz
 
 ```bash
 # Reset everything
-rm -rf ~/.config/spuff/
+rm -rf ~/.spuff/
 
 # Clear state, keep config
-rm ~/.config/spuff/state.db
+rm ~/.spuff/state.db
 
 # Debug logging
 RUST_LOG=spuff=debug cargo run -- <command>

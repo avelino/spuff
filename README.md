@@ -101,7 +101,7 @@ sudo cp target/release/spuff /usr/local/bin/
 spuff init
 ```
 
-This creates `~/.config/spuff/config.yaml` with your preferences.
+This creates `~/.spuff/config.yaml` with your preferences.
 
 ### 2. Set your cloud provider token
 
@@ -171,7 +171,7 @@ spuff exec "uname -a"       # Run command on remote
 
 ## Configuration
 
-Configuration lives at `~/.config/spuff/config.yaml`:
+Configuration lives at `~/.spuff/config.yaml`:
 
 ```yaml
 provider: digitalocean

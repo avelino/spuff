@@ -69,7 +69,7 @@ impl AppConfig {
     pub fn config_dir() -> Result<PathBuf> {
         let home = std::env::var("HOME")
             .map_err(|_| SpuffError::Config("HOME environment variable not set".to_string()))?;
-        Ok(PathBuf::from(home).join(".config").join("spuff"))
+        Ok(PathBuf::from(home).join(".spuff"))
     }
 
     pub fn config_path() -> Result<PathBuf> {
@@ -393,7 +393,7 @@ tailscale_authkey: tskey-xxx
     #[ignore]
     fn test_config_save_and_load() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path().join(".config").join("spuff");
+        let config_dir = temp_dir.path().join(".spuff");
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_path = config_dir.join("config.yaml");
 
@@ -437,7 +437,7 @@ tailscale_authkey: tskey-xxx
     #[ignore]
     fn test_config_load_with_env_token() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path().join(".config").join("spuff");
+        let config_dir = temp_dir.path().join(".spuff");
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_path = config_dir.join("config.yaml");
 
