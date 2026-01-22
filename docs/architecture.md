@@ -31,7 +31,7 @@ flowchart TB
             ssh["SSH<br/>Connector"]
             state["State<br/>(SQLite)"]
         end
-        statedb[("~/.config/spuff/<br/>state.db")]
+        statedb[("~/.spuff/<br/>state.db")]
         stdout["stdout<br/>(TUI progress)"]
     end
 
@@ -654,7 +654,7 @@ This file is read by the agent's `/status` endpoint.
 
 Located in `src/state.rs`.
 
-**Database:** SQLite at `~/.config/spuff/state.db`
+**Database:** SQLite at `~/.spuff/state.db`
 
 ### Schema
 
@@ -959,7 +959,7 @@ From cloud-init:
 | API Token | env var or config.yaml | File permissions (0600) |
 | SSH Private Key | ~/.ssh/id_* | File permissions (0600) |
 | Agent Token | env var | Process environment |
-| State DB | ~/.config/spuff/state.db | File permissions |
+| State DB | ~/.spuff/state.db | File permissions |
 
 ---
 
@@ -1273,5 +1273,5 @@ curl -H "X-Spuff-Token: $TOKEN" http://127.0.0.1:7575/status
 ### Local State
 
 ```bash
-sqlite3 ~/.config/spuff/state.db "SELECT * FROM instances;"
+sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
 ```

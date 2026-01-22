@@ -97,7 +97,7 @@ Inspect local state database:
 brew install sqlite
 
 # View state
-sqlite3 ~/.config/spuff/state.db "SELECT * FROM instances;"
+sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
 ```
 
 ## IDE Setup
@@ -178,8 +178,8 @@ Create a test configuration:
 cargo run -- init
 
 # Or create manually
-mkdir -p ~/.config/spuff
-cat > ~/.config/spuff/config.yaml << EOF
+mkdir -p ~/.spuff
+cat > ~/.spuff/config.yaml << EOF
 provider: digitalocean
 region: nyc1
 size: s-1vcpu-1gb  # Small for testing
@@ -300,7 +300,7 @@ sudo journalctl -u spuff-agent -f
 Reset local state:
 
 ```bash
-rm ~/.config/spuff/state.db
+rm ~/.spuff/state.db
 ```
 
 ## Next Steps

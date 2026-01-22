@@ -15,7 +15,7 @@ spuff status
 RUST_LOG=debug spuff status
 
 # Check local state
-sqlite3 ~/.config/spuff/state.db "SELECT * FROM instances;"
+sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
 ```
 
 ---
@@ -329,7 +329,7 @@ Error: No active instance found
 **Diagnosis:**
 ```bash
 # Check local state
-sqlite3 ~/.config/spuff/state.db "SELECT * FROM instances;"
+sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
 
 # Check provider for spuff instances
 curl -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
@@ -345,7 +345,7 @@ curl -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
 2. **Instance was deleted externally**
    ```bash
    # Clear local state
-   rm ~/.config/spuff/state.db
+   rm ~/.spuff/state.db
    ```
 
 ### State out of sync
@@ -357,7 +357,7 @@ curl -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
 **Solution:**
 ```bash
 # Reset local state
-rm ~/.config/spuff/state.db
+rm ~/.spuff/state.db
 
 # Recreate
 spuff up
@@ -449,7 +449,7 @@ Error: Request failed: connection refused
 
 **Symptoms:**
 ```
-Error: Config file not found at ~/.config/spuff/config.yaml
+Error: Config file not found at ~/.spuff/config.yaml
 ```
 
 **Solution:**
@@ -467,10 +467,10 @@ Error: Invalid config: missing field 'region'
 **Solution:**
 ```bash
 # View current config
-cat ~/.config/spuff/config.yaml
+cat ~/.spuff/config.yaml
 
 # Recreate
-rm ~/.config/spuff/config.yaml
+rm ~/.spuff/config.yaml
 spuff init
 ```
 
@@ -511,7 +511,7 @@ spuff status --detailed
 spuff config show
 
 # Reset state
-rm ~/.config/spuff/state.db
+rm ~/.spuff/state.db
 
 # Reset terminal
 reset

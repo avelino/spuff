@@ -3,7 +3,7 @@
 //! This module handles a spuff-managed ed25519 SSH key that avoids the RSA SHA2
 //! authentication issues with older russh versions.
 //!
-//! The key is stored at `~/.config/spuff/ssh_key` and is created automatically
+//! The key is stored at `~/.spuff/ssh_key` and is created automatically
 //! if it doesn't exist.
 
 use std::path::PathBuf;
@@ -15,10 +15,10 @@ use crate::error::{Result, SpuffError};
 
 /// Get the path to the spuff managed SSH key.
 pub fn get_managed_key_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| SpuffError::Ssh("Cannot determine config directory".to_string()))?;
+    let home = std::env::var("HOME")
+        .map_err(|_| SpuffError::Ssh("HOME environment variable not set".to_string()))?;
 
-    Ok(config_dir.join("spuff").join("ssh_key"))
+    Ok(PathBuf::from(home).join(".spuff").join("ssh_key"))
 }
 
 /// Check if the managed key exists.
@@ -29,7 +29,7 @@ pub fn managed_key_exists() -> Result<bool> {
 
 /// Generate a new ed25519 SSH key for spuff.
 ///
-/// Creates the key at `~/.config/spuff/ssh_key` with no passphrase.
+/// Creates the key at `~/.spuff/ssh_key` with no passphrase.
 /// This key is used to authenticate with spuff-provisioned instances.
 pub fn generate_managed_key() -> Result<PathBuf> {
     let key_path = get_managed_key_path()?;

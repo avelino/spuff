@@ -12,6 +12,7 @@
 //! - macOS: macFUSE + SSHFS (brew install macfuse sshfs)
 //! - Linux: fuse + sshfs (apt install sshfs)
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::error::{Result, SpuffError};
+use crate::ssh::{SshClient, SshConfig};
 use crate::volume::config::VolumeConfig;
 use crate::volume::driver::VolumeDriver;
 use crate::volume::state::{MountHandle, MountStatus};
@@ -411,15 +413,15 @@ impl SshfsLocalCommands {
         // Input validation already done in mount(), but double-check for safety
         validate_shell_safe_path(ssh_key_path)?;
 
-        // Use a secure directory - prefer XDG runtime dir, then data dir, then cache
-        // Avoid /tmp for security (symlink attacks)
-        let wrapper_dir = dirs::runtime_dir()
-            .or_else(dirs::data_local_dir)
-            .or_else(dirs::cache_dir)
+        // Use ~/.spuff/ssh-wrappers to avoid paths with spaces
+        // IMPORTANT: SSHFS cannot handle spaces in the ssh_command path
+        // macOS dirs::data_local_dir() returns "~/Library/Application Support" which has a space
+        // Using home_dir ensures no spaces (home directories rarely have spaces)
+        let wrapper_dir = dirs::home_dir()
             .ok_or_else(|| {
-                SpuffError::Volume("Could not determine secure directory for SSH wrapper".into())
+                SpuffError::Volume("Could not determine home directory for SSH wrapper".into())
             })?
-            .join("spuff")
+            .join(".spuff")
             .join("ssh-wrappers");
 
         // Create directory with restricted permissions
@@ -508,38 +510,21 @@ exec ssh -i '{}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o Us
             return Ok(());
         }
 
-        // Use separate arguments to avoid shell quoting issues
-        let output = Command::new("ssh")
-            .args([
-                "-i",
-                ssh_key_path,
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                &format!("{}@{}", ssh_user, vm_ip),
-                "--",
-                "mkdir",
-                "-p",
-                remote_path,
-            ])
-            .output()
+        // Use internal SSH implementation
+        let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+        let client = SshClient::connect(vm_ip, 22, &config)
             .await
-            .map_err(|e| {
-                SpuffError::Volume(format!("Failed to create remote directory via SSH: {}", e))
-            })?;
+            .map_err(|e| SpuffError::Volume(format!("Failed to connect via SSH: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let command = format!("mkdir -p '{}'", remote_path.replace('\'', "'\\''"));
+        let output = client.exec(&command).await.map_err(|e| {
+            SpuffError::Volume(format!("Failed to create remote directory via SSH: {}", e))
+        })?;
+
+        if !output.success {
             return Err(SpuffError::Volume(format!(
                 "Failed to create remote directory '{}': {}",
-                remote_path, stderr
+                remote_path, output.stderr
             )));
         }
 

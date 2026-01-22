@@ -23,7 +23,7 @@ flowchart TB
     subgraph trusted["User's Machine (Trusted)"]
         token["API Token<br/>(env var)"]
         sshkeys["SSH Keys<br/>(filesystem)<br/>0600 perms"]
-        state[("Local State<br/>~/.config/spuff/state.db")]
+        state[("Local State<br/>~/.spuff/state.db")]
     end
 
     subgraph semitrust["Cloud VM (Semi-trusted)"]
@@ -176,8 +176,8 @@ users:
 
 | Data | Storage | Protection |
 |------|---------|------------|
-| Config | ~/.config/spuff/config.yaml | 0600 permissions |
-| State | ~/.config/spuff/state.db | Standard file perms |
+| Config | ~/.spuff/config.yaml | 0600 permissions |
+| State | ~/.spuff/state.db | Standard file perms |
 | SSH keys | ~/.ssh/ | 0600 permissions |
 
 #### In Transit

@@ -17,7 +17,7 @@ This directory contains example configurations and templates for spuff.
 Copy an example to your config directory:
 
 ```bash
-cp examples/configs/developer.yaml ~/.config/spuff/config.yaml
+cp examples/configs/developer.yaml ~/.spuff/config.yaml
 ```
 
 Or use as a reference when running `spuff init`.

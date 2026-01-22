@@ -154,7 +154,7 @@ Configuration values follow this precedence order (highest to lowest):
 
 1. CLI flags (`--size`, `--region`)
 2. Project configuration (`spuff.yaml`)
-3. Global configuration (`~/.config/spuff/config.yaml`)
+3. Global configuration (`~/.spuff/config.yaml`)
 4. Provider defaults
 
 ### size

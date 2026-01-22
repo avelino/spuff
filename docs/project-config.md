@@ -140,7 +140,7 @@ resources:
   region: fra1         # Region
 ```
 
-**Precedence:** CLI flags > spuff.yaml > ~/.config/spuff/config.yaml
+**Precedence:** CLI flags > spuff.yaml > ~/.spuff/config.yaml
 
 ---
 

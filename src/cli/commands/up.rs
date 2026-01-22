@@ -11,7 +11,7 @@ use crate::environment::cloud_init::generate_cloud_init_with_ai_tools;
 use crate::error::{Result, SpuffError};
 use crate::project_config::{AiToolsConfig, ProjectConfig};
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
-use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase};
+use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase, SshClient, SshConfig};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
 use crate::volume::{get_install_instructions, SshfsDriver, SshfsLocalCommands, VolumeState};
@@ -1294,29 +1294,25 @@ async fn sync_to_vm(
     };
 
     if !path_to_create.is_empty() && path_to_create != "/" {
-        let mkdir_output = Command::new("ssh")
-            .args([
-                "-i",
-                ssh_key_path,
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                &format!("{}@{}", ssh_user, vm_ip),
-                "--",
-                "mkdir",
-                "-p",
-                &path_to_create,
-            ])
-            .output()
-            .await
-            .map_err(|e| SpuffError::Volume(format!("Failed to create remote directory: {}", e)))?;
-
-        if !mkdir_output.status.success() {
-            let stderr = String::from_utf8_lossy(&mkdir_output.stderr);
-            tracing::warn!("Failed to create remote directory: {}", stderr);
+        // Use internal SSH implementation
+        let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+        match SshClient::connect(vm_ip, 22, &config).await {
+            Ok(client) => {
+                let command = format!("mkdir -p '{}'", path_to_create.replace('\'', "'\\''"));
+                match client.exec(&command).await {
+                    Ok(output) => {
+                        if !output.success {
+                            tracing::warn!("Failed to create remote directory: {}", output.stderr);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create remote directory: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect via SSH: {}", e);
+            }
         }
     }
 
