@@ -1,4 +1,4 @@
-//! AI coding tools installation (claude-code, codex, opencode).
+//! AI coding tools installation (claude-code, codex, opencode, copilot).
 
 use super::installer::DevToolsInstaller;
 use super::types::ToolStatus;
@@ -105,6 +105,37 @@ impl<'a> AiToolsInstaller<'a> {
             }
         }
     }
+
+    pub async fn install_copilot(&self) {
+        self.installer
+            .update_status("copilot", ToolStatus::Installing, None)
+            .await;
+
+        match self
+            .installer
+            .run_command("npm install -g @github/copilot")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("copilot --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("copilot", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("GitHub Copilot CLI installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("copilot", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("GitHub Copilot CLI installation failed: {}", e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +168,12 @@ mod tests {
             npm_package: "opencode-ai",
             binary: "opencode",
             version_cmd: "opencode --version",
+        },
+        AiToolSpec {
+            id: "copilot",
+            npm_package: "@github/copilot",
+            binary: "copilot",
+            version_cmd: "copilot --version",
         },
     ];
 
@@ -205,6 +242,7 @@ mod tests {
         assert!(tool_ids.contains(&"claude-code"));
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
+        assert!(tool_ids.contains(&"copilot"));
     }
 
     #[test]
@@ -217,6 +255,7 @@ mod tests {
         assert_eq!(specs.get("claude-code"), Some(&"@anthropic-ai/claude-code"));
         assert_eq!(specs.get("codex"), Some(&"@openai/codex"));
         assert_eq!(specs.get("opencode"), Some(&"opencode-ai"));
+        assert_eq!(specs.get("copilot"), Some(&"@github/copilot"));
     }
 
     /// Integration test: verify AI tools are in PATH after installation

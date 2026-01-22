@@ -19,6 +19,11 @@ const AI_TOOLS: &[(&str, &str, &str)] = &[
         "Open-source AI coding assistant",
         "npm i -g opencode-ai",
     ),
+    (
+        "copilot",
+        "GitHub Copilot CLI",
+        "npm install -g @github/copilot",
+    ),
 ];
 
 /// Response from agent's /devtools endpoint
@@ -188,13 +193,16 @@ pub async fn install(config: &AppConfig, tool: String) -> Result<()> {
     // Explicitly disable non-AI devtools to prevent reinstallation (serde defaults are true)
     let config_json = match tool.as_str() {
         "claude-code" => {
-            r#"{"claude_code":true,"codex":false,"opencode":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+            r#"{"claude_code":true,"codex":false,"opencode":false,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
         }
         "codex" => {
-            r#"{"claude_code":false,"codex":true,"opencode":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+            r#"{"claude_code":false,"codex":true,"opencode":false,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
         }
         "opencode" => {
-            r#"{"claude_code":false,"codex":false,"opencode":true,"docker":false,"shell_tools":false,"nodejs":false}"#
+            r#"{"claude_code":false,"codex":false,"opencode":true,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+        }
+        "copilot" => {
+            r#"{"claude_code":false,"codex":false,"opencode":false,"copilot":true,"docker":false,"shell_tools":false,"nodejs":false}"#
         }
         _ => unreachable!(),
     };
@@ -267,6 +275,12 @@ pub async fn info(tool: &str) -> Result<()> {
             println!("  {}", style("Configuration").bold());
             println!("    Open-source, supports multiple AI providers");
             println!("    Documentation: https://opencode.ai");
+        }
+        "copilot" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    Requires active GitHub Copilot subscription");
+            println!("    Auth: /login command or GH_TOKEN/GITHUB_TOKEN env var");
+            println!("    Documentation: https://github.com/github/copilot-cli");
         }
         _ => {}
     }

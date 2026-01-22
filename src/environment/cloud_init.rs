@@ -71,6 +71,7 @@ write_files:
         "claude_code": {{ ai_claude_code }},
         "codex": {{ ai_codex }},
         "opencode": {{ ai_opencode }},
+        "copilot": {{ ai_copilot }},
         "environment": {% if environment %}"{{ environment }}"{% else %}null{% endif %},
         "dotfiles": {% if dotfiles %}"{{ dotfiles }}"{% else %}null{% endif %},
         "tailscale": {% if tailscale_enabled %}true{% else %}false{% endif %},
@@ -530,6 +531,7 @@ pub fn generate_cloud_init_with_ai_tools(
     let ai_claude_code = ai_tools.should_install("claude-code");
     let ai_codex = ai_tools.should_install("codex");
     let ai_opencode = ai_tools.should_install("opencode");
+    let ai_copilot = ai_tools.should_install("copilot");
 
     // Get required packages for volume mounts
     let volume_packages: Vec<&str> = project_config
@@ -567,6 +569,7 @@ pub fn generate_cloud_init_with_ai_tools(
     context.insert("ai_claude_code", &ai_claude_code);
     context.insert("ai_codex", &ai_codex);
     context.insert("ai_opencode", &ai_opencode);
+    context.insert("ai_copilot", &ai_copilot);
     // Volume packages
     context.insert("volume_packages", &volume_packages);
 
@@ -807,6 +810,7 @@ mod tests {
         assert!(result.contains("\"claude_code\": true"));
         assert!(result.contains("\"codex\": true"));
         assert!(result.contains("\"opencode\": true"));
+        assert!(result.contains("\"copilot\": true"));
     }
 
     #[test]
@@ -824,6 +828,7 @@ mod tests {
         assert!(result.contains("\"claude_code\": false"));
         assert!(result.contains("\"codex\": false"));
         assert!(result.contains("\"opencode\": false"));
+        assert!(result.contains("\"copilot\": false"));
     }
 
     #[test]
@@ -843,6 +848,7 @@ mod tests {
         assert!(result.contains("\"claude_code\": true"));
         assert!(result.contains("\"codex\": false"));
         assert!(result.contains("\"opencode\": false"));
+        assert!(result.contains("\"copilot\": false"));
     }
 
     #[test]

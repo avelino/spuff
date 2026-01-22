@@ -57,6 +57,10 @@ pub struct DevToolsConfig {
     #[serde(default = "default_true")]
     pub opencode: bool,
 
+    /// Install GitHub Copilot CLI
+    #[serde(default = "default_true")]
+    pub copilot: bool,
+
     /// Dev environment: "devbox", "nix", or empty
     #[serde(default)]
     pub environment: Option<String>,
@@ -172,6 +176,13 @@ impl Default for DevToolsState {
                     version: None,
                 },
                 DevTool {
+                    id: "copilot",
+                    name: "GitHub Copilot CLI",
+                    description: "AI coding assistant (GitHub)",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
                     id: "devenv",
                     name: "Dev Environment",
                     description: "Devbox or Nix",
@@ -212,6 +223,7 @@ mod tests {
         );
         assert!(config.codex, "codex should default to true via serde");
         assert!(config.opencode, "opencode should default to true via serde");
+        assert!(config.copilot, "copilot should default to true via serde");
         assert!(config.docker, "docker should default to true via serde");
         assert!(
             config.shell_tools,
@@ -222,11 +234,12 @@ mod tests {
 
     #[test]
     fn test_devtools_config_deserialize_ai_tools() {
-        let json = r#"{"claude_code": true, "codex": false, "opencode": true}"#;
+        let json = r#"{"claude_code": true, "codex": false, "opencode": true, "copilot": false}"#;
         let config: DevToolsConfig = serde_json::from_str(json).unwrap();
         assert!(config.claude_code);
         assert!(!config.codex);
         assert!(config.opencode);
+        assert!(!config.copilot);
     }
 
     #[test]
@@ -239,6 +252,7 @@ mod tests {
         assert!(tool_ids.contains(&"claude_code"));
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
+        assert!(tool_ids.contains(&"copilot"));
         assert!(tool_ids.contains(&"devenv"));
         assert!(tool_ids.contains(&"dotfiles"));
         assert!(tool_ids.contains(&"tailscale"));
