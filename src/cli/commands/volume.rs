@@ -199,22 +199,25 @@ pub async fn status(config: &AppConfig) -> Result<()> {
         }
     }
 
+    // Get SSH key path for remote checks
+    let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
+        .unwrap_or_else(|_| PathBuf::from(&config.ssh_key_path));
+    let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
+
     if !merged_volumes.is_empty() {
         for (vol, base_dir, is_global) in &merged_volumes {
             let mount_point = vol.resolve_mount_point(Some(&instance.name), *base_dir);
             let source_path = vol.resolve_source(*base_dir);
 
-            // Determine if this is a file (same logic as mount_single_volume)
-            let is_file = if !source_path.is_empty() && std::path::Path::new(&source_path).exists()
-            {
-                std::fs::metadata(&source_path)
-                    .map(|m| m.is_file())
-                    .unwrap_or(false)
-            } else {
-                // If no source, check if target looks like a file (has extension and no trailing /)
-                let target = &vol.target;
-                !target.ends_with('/') && std::path::Path::new(target).extension().is_some()
-            };
+            // Determine if this is a file using SSH check when local source doesn't exist
+            let is_file = is_file_volume_async(
+                &source_path,
+                &vol.target,
+                &instance.ip,
+                &config.ssh_user,
+                &ssh_key_str,
+            )
+            .await;
 
             let source_label = if *is_global {
                 style("[global]").yellow()
@@ -425,16 +428,9 @@ async fn mount_single_volume(
     let mount_point = volume.resolve_mount_point(instance_name, project_base_dir);
     let source_path = volume.resolve_source(project_base_dir);
 
-    // Determine if source is a file or directory
-    let source_is_file = if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
-        std::fs::metadata(&source_path)
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-    } else {
-        // If no source, check if target looks like a file (has extension and no trailing /)
-        let target = &volume.target;
-        !target.ends_with('/') && std::path::Path::new(target).extension().is_some()
-    };
+    // Determine if source is a file or directory using SSH check when local source doesn't exist
+    let source_is_file =
+        is_file_volume_async(&source_path, &volume.target, vm_ip, ssh_user, ssh_key_path).await;
 
     // For files, we only sync - SSHFS doesn't support mounting individual files
     if source_is_file {
@@ -844,10 +840,58 @@ pub async fn remount(config: &AppConfig, target: Option<String>) -> Result<()> {
     Ok(())
 }
 
-// Helper function
+/// Check if a remote path is a file (not directory) via SSH
+/// Returns true if it's a file, false if it's a directory or doesn't exist
+async fn is_file_volume_async(
+    source_path: &str,
+    target: &str,
+    vm_ip: &str,
+    ssh_user: &str,
+    ssh_key_path: &str,
+) -> bool {
+    // If source exists locally, use its metadata
+    if !source_path.is_empty() && std::path::Path::new(source_path).exists() {
+        return std::fs::metadata(source_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+    }
+
+    // If target ends with /, it's definitely a directory
+    if target.ends_with('/') {
+        return false;
+    }
+
+    // Check remotely via SSH if the target exists and is a directory
+    let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+    if let Ok(client) = SshClient::connect(vm_ip, 22, &config).await {
+        // Use test -d to check if path is a directory, test -f to check if it's a file
+        let escaped_target = target.replace('\'', "'\\''");
+        let command = format!(
+            "if [ -d '{}' ]; then echo 'dir'; elif [ -f '{}' ]; then echo 'file'; else echo 'unknown'; fi",
+            escaped_target, escaped_target
+        );
+        if let Ok(output) = client.exec(&command).await {
+            let result = output.stdout.trim();
+            match result {
+                "dir" => return false,
+                "file" => return true,
+                _ => {
+                    // Path doesn't exist yet - default to directory (safer for SSHFS)
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Fallback: if SSH check fails, default to directory (safer for SSHFS)
+    false
+}
+
+// Helper function - uses char-based truncation to avoid UTF-8 panics
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}…", &s[..max_len - 1])
+    if s.chars().count() > max_len {
+        let truncated: String = s.chars().take(max_len - 1).collect();
+        format!("{}…", truncated)
     } else {
         s.to_string()
     }

@@ -810,7 +810,15 @@ async fn provision_instance(
                 let source_path = vol.resolve_source(*base_dir);
 
                 // Check if this is a file volume (SSHFS doesn't support mounting files)
-                let is_file = is_file_volume(&source_path, &vol.target);
+                // Use async version that checks remotely via SSH when local source doesn't exist
+                let is_file = is_file_volume_async(
+                    &source_path,
+                    &vol.target,
+                    &instance.ip.to_string(),
+                    &params.config.ssh_user,
+                    &ssh_key_str,
+                )
+                .await;
 
                 tx.send(ProgressMessage::SetDetail(format!(
                     "{} volume {}/{}: {}",
@@ -1349,13 +1357,50 @@ async fn sync_to_vm(
 }
 
 /// Check if a source path is a file (not directory)
-fn is_file_volume(source_path: &str, target: &str) -> bool {
+/// If source exists locally, use its metadata.
+/// If source doesn't exist, check remotely via SSH.
+async fn is_file_volume_async(
+    source_path: &str,
+    target: &str,
+    vm_ip: &str,
+    ssh_user: &str,
+    ssh_key_path: &str,
+) -> bool {
+    // If source exists locally, use its metadata
     if !source_path.is_empty() && std::path::Path::new(source_path).exists() {
-        std::fs::metadata(source_path)
+        return std::fs::metadata(source_path)
             .map(|m| m.is_file())
-            .unwrap_or(false)
-    } else {
-        // If no source, check if target looks like a file (has extension and no trailing /)
-        !target.ends_with('/') && std::path::Path::new(target).extension().is_some()
+            .unwrap_or(false);
     }
+
+    // If target ends with /, it's definitely a directory
+    if target.ends_with('/') {
+        return false;
+    }
+
+    // Check remotely via SSH if the target exists and is a directory
+    let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+    if let Ok(client) = SshClient::connect(vm_ip, 22, &config).await {
+        // Use test -d to check if path is a directory, test -f to check if it's a file
+        let escaped_target = target.replace('\'', "'\\''");
+        let command = format!(
+            "if [ -d '{}' ]; then echo 'dir'; elif [ -f '{}' ]; then echo 'file'; else echo 'unknown'; fi",
+            escaped_target, escaped_target
+        );
+        if let Ok(output) = client.exec(&command).await {
+            let result = output.stdout.trim();
+            match result {
+                "dir" => return false,
+                "file" => return true,
+                _ => {
+                    // Path doesn't exist yet - default to directory (safer for SSHFS)
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Fallback: if SSH check fails, default to directory (safer for SSHFS)
+    // This allows the mount to proceed and the user can see if it fails
+    false
 }
