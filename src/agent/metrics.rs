@@ -65,7 +65,9 @@ impl SystemMetrics {
         let (disk_total, disk_used) = disks
             .iter()
             .find(|d| d.mount_point() == std::path::Path::new("/"))
-            .map_or((0, 0), |d| (d.total_space(), d.total_space() - d.available_space()));
+            .map_or((0, 0), |d| {
+                (d.total_space(), d.total_space() - d.available_space())
+            });
 
         let memory_total = sys.total_memory();
         let memory_used = sys.used_memory();
@@ -157,7 +159,10 @@ mod tests {
         let metrics = SystemMetrics::collect();
 
         assert!(metrics.cpus > 0, "Should have at least one CPU");
-        assert!(metrics.memory_total > 0, "Should have non-zero total memory");
+        assert!(
+            metrics.memory_total > 0,
+            "Should have non-zero total memory"
+        );
         assert!((0.0..=100.0).contains(&metrics.memory_percent));
         assert!((0.0..=100.0).contains(&metrics.disk_percent));
     }
@@ -258,8 +263,7 @@ mod tests {
         assert!(metrics.disk_used <= metrics.disk_total);
 
         if metrics.disk_total > 0 {
-            let expected_percent =
-                (metrics.disk_used as f32 / metrics.disk_total as f32) * 100.0;
+            let expected_percent = (metrics.disk_used as f32 / metrics.disk_total as f32) * 100.0;
             let diff = (metrics.disk_percent - expected_percent).abs();
             assert!(diff < 0.1, "Disk percent calculation should be accurate");
         }

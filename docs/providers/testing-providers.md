@@ -4,19 +4,12 @@ This guide covers testing strategies for cloud provider implementations.
 
 ## Testing Levels
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Integration Tests                         │
-│              (Real API, real resources)                      │
-│                    cargo test --ignored                      │
-└─────────────────────────────────────────────────────────────┘
-                              ▲
-                              │
-┌─────────────────────────────────────────────────────────────┐
-│                      Unit Tests                              │
-│               (Mocked API responses)                         │
-│                       cargo test                             │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart BT
+    unit["Unit Tests<br/>(Mocked API responses)<br/>cargo test"]
+    integration["Integration Tests<br/>(Real API, real resources)<br/>cargo test --ignored"]
+
+    unit --> integration
 ```
 
 ## Unit Tests with Mocked API

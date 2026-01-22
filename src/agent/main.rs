@@ -27,6 +27,7 @@ mod devtools;
 mod metrics;
 mod project_setup;
 mod routes;
+mod volume_manager;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -156,11 +157,7 @@ impl AppState {
     /// Get recent activity log entries
     pub async fn get_activity_log(&self, limit: usize) -> Vec<ActivityLogEntry> {
         let log = self.activity_log.read().await;
-        log.iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        log.iter().rev().take(limit).cloned().collect()
     }
 }
 
@@ -185,7 +182,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get username for devtools installation
     let username = std::env::var("SPUFF_AGENT_USER")
         .ok()
-        .or_else(|| std::fs::read_to_string("/opt/spuff/username").ok().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            std::fs::read_to_string("/opt/spuff/username")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
         .unwrap_or_else(|| "dev".to_string());
 
     if auth_token.is_some() {
@@ -204,10 +205,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Log agent startup
     {
         let hostname = sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string());
-        state.log_activity(
-            "agent_started",
-            Some(format!("spuff-agent v{} on {} (port {})", env!("CARGO_PKG_VERSION"), hostname, port))
-        ).await;
+        state
+            .log_activity(
+                "agent_started",
+                Some(format!(
+                    "spuff-agent v{} on {} (port {})",
+                    env!("CARGO_PKG_VERSION"),
+                    hostname,
+                    port
+                )),
+            )
+            .await;
     }
 
     // Background task to update metrics periodically

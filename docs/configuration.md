@@ -7,7 +7,7 @@ This document describes all configuration options available in spuff's `config.y
 The configuration file is located at:
 
 ```
-~/.config/spuff/config.yaml
+~/.spuff/config.yaml
 ```
 
 To create or edit the configuration:
@@ -484,7 +484,7 @@ spuff up --dev
 The config file is created with restricted permissions (`0600`) to protect sensitive data like tokens. If you edit the file manually, ensure proper permissions:
 
 ```bash
-chmod 600 ~/.config/spuff/config.yaml
+chmod 600 ~/.spuff/config.yaml
 ```
 
 ---
@@ -538,7 +538,7 @@ ssh_user: ci
 ### Config not found
 
 ```
-Error: Config file not found: ~/.config/spuff/config.yaml. Run 'spuff init' first.
+Error: Config file not found: ~/.spuff/config.yaml. Run 'spuff init' first.
 ```
 
 **Solution:** Run `spuff init` to create the configuration file.

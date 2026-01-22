@@ -216,8 +216,10 @@ impl StateDb {
     /// Update the IP address of an instance.
     #[allow(dead_code)]
     pub fn update_instance_ip(&self, id: &str, ip: &str) -> Result<()> {
-        self.conn
-            .execute("UPDATE instances SET ip = ?1 WHERE id = ?2", params![ip, id])?;
+        self.conn.execute(
+            "UPDATE instances SET ip = ?1 WHERE id = ?2",
+            params![ip, id],
+        )?;
         Ok(())
     }
 }

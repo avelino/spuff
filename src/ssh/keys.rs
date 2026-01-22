@@ -41,8 +41,9 @@ pub fn key_has_passphrase(path: impl AsRef<Path>) -> Result<bool> {
 pub fn key_fingerprint(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
 
-    let key_data = std::fs::read_to_string(path)
-        .map_err(|e| SpuffError::Ssh(format!("Failed to read key file {}: {}", path.display(), e)))?;
+    let key_data = std::fs::read_to_string(path).map_err(|e| {
+        SpuffError::Ssh(format!("Failed to read key file {}: {}", path.display(), e))
+    })?;
 
     // Try to parse as private key first
     if let Ok(private_key) = PrivateKey::from_openssh(&key_data) {

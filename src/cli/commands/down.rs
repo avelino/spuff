@@ -3,9 +3,11 @@ use dialoguer::Confirm;
 
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
+use crate::project_config::ProjectConfig;
 use crate::provider::create_provider;
 use crate::state::StateDb;
 use crate::utils::format_elapsed;
+use crate::volume::{SshfsLocalCommands, VolumeState};
 
 pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> Result<()> {
     let db = StateDb::open()?;
@@ -50,6 +52,62 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
         }
     }
 
+    // Unmount any locally mounted volumes BEFORE destroying the instance
+    // This prevents SSHFS from hanging when the remote server disappears
+    let project_config = ProjectConfig::load_from_cwd().ok().flatten();
+    let mut volume_state = VolumeState::load_or_default();
+
+    // Collect all mount points to unmount
+    let mut mount_points_to_unmount: Vec<String> = Vec::new();
+
+    // Add mounts from project config
+    if let Some(ref pc) = project_config {
+        for vol in &pc.volumes {
+            let mount_point = vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
+            if !mount_points_to_unmount.contains(&mount_point) {
+                mount_points_to_unmount.push(mount_point);
+            }
+        }
+    }
+
+    // Add tracked mounts from state
+    for m in &volume_state.mounts {
+        if !mount_points_to_unmount.contains(&m.mount_point) {
+            mount_points_to_unmount.push(m.mount_point.clone());
+        }
+    }
+
+    if !mount_points_to_unmount.is_empty() {
+        println!();
+        println!(
+            "  {} {}",
+            style("◐").cyan(),
+            style("Unmounting local volumes...").dim()
+        );
+
+        for mount_point in &mount_points_to_unmount {
+            print!("    {} {}", style("→").dim(), style(&mount_point).white());
+
+            match SshfsLocalCommands::unmount(mount_point).await {
+                Ok(_) => {
+                    println!(" {}", style("✓").green());
+                    volume_state.remove_mount(mount_point);
+                }
+                Err(e) => {
+                    println!(" {}", style("✕").red());
+                    tracing::warn!("Failed to unmount {}: {}", mount_point, e);
+                    // Continue with other unmounts even if one fails
+                }
+            }
+        }
+
+        // Clear volume state - log errors but don't fail the down operation
+        volume_state.clear();
+        if let Err(e) = volume_state.save() {
+            tracing::warn!("Failed to clear volume state: {}", e);
+        }
+    }
+
     let provider = create_provider(config)?;
 
     if create_snapshot {
@@ -69,11 +127,7 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
                 );
             }
             Err(e) => {
-                println!(
-                    "  {} Snapshot failed: {}",
-                    style("!").yellow().bold(),
-                    e
-                );
+                println!("  {} Snapshot failed: {}", style("!").yellow().bold(), e);
             }
         }
     }

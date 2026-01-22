@@ -74,15 +74,13 @@ pub async fn wait_for_ssh_login(host: &str, config: &SshConfig, timeout: Duratio
     let start = std::time::Instant::now();
 
     while start.elapsed() < timeout {
-        match SshClient::connect(host, 22, config).await {
-            Ok(client) => {
-                // Try a simple command to verify connection works
-                match client.exec("echo ok").await {
-                    Ok(output) if output.success => return Ok(()),
-                    _ => {}
+        if let Ok(client) = SshClient::connect(host, 22, config).await {
+            // Try a simple command to verify connection works
+            if let Ok(output) = client.exec("echo ok").await {
+                if output.success {
+                    return Ok(());
                 }
             }
-            Err(_) => {}
         }
 
         tokio::time::sleep(Duration::from_secs(3)).await;

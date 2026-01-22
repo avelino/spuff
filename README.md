@@ -64,6 +64,8 @@ A single CLI that provisions a cloud VM with your dev environment, connects you 
 | **Tailscale Integration** | ✅ | Private networking without exposing ports |
 | **Remote Agent** | ✅ | Monitor CPU, memory, processes from CLI |
 | **Dotfiles Sync** | ✅ | Your shell config, everywhere |
+| **Volume Mounts (SSHFS)** | ✅ | Bidirectional file sync between local and remote |
+| **Port Tunneling** | ✅ | Forward remote ports to localhost |
 | **Multi-cloud** | 🚧 | DigitalOcean ✅, Hetzner 🚧, AWS 🚧 |
 | **Devbox/Nix** | 🚧 | Reproducible environments |
 
@@ -99,7 +101,7 @@ sudo cp target/release/spuff /usr/local/bin/
 spuff init
 ```
 
-This creates `~/.config/spuff/config.yaml` with your preferences.
+This creates `~/.spuff/config.yaml` with your preferences.
 
 ### 2. Set your cloud provider token
 
@@ -153,6 +155,11 @@ spuff agent logs -n 50      # Last 50 lines
 spuff agent devtools status   # Show devtools installation progress
 spuff agent devtools install  # Trigger devtools installation
 
+# Volume mounts (SSHFS)
+spuff volume mount ./src /home/dev/project  # Mount local dir on remote
+spuff volume unmount /home/dev/project      # Unmount a volume
+spuff volume ls                             # List active mounts
+
 # Configuration
 spuff config show           # Display current config
 spuff config set region nyc3
@@ -164,7 +171,7 @@ spuff exec "uname -a"       # Run command on remote
 
 ## Configuration
 
-Configuration lives at `~/.config/spuff/config.yaml`:
+Configuration lives at `~/.spuff/config.yaml`:
 
 ```yaml
 provider: digitalocean
@@ -191,30 +198,45 @@ tailscale_authkey: tskey-auth-xxx  # or use TS_AUTHKEY env var
 
 ## Architecture
 
-```
-┌─────────────────┐         ┌──────────────────────────────────┐
-│   Your Machine  │         │        Cloud VM                  │
-│                 │         │                                  │
-│  ┌───────────┐  │   SSH   │  ┌────────────┐  ┌────────────┐ │
-│  │  spuff    │──┼────────►│  │   sshd     │  │   Docker   │ │
-│  │   CLI     │  │    -A   │  └────────────┘  └────────────┘ │
-│  └───────────┘  │         │                                  │
-│                 │         │  ┌────────────────────────────┐  │
-│  SSH Agent ─────┼────────►│  │      spuff-agent          │  │
-│  (keys)         │ forward │  │  • metrics & monitoring   │  │
-│                 │         │  │  • idle detection         │  │
-└─────────────────┘         │  │  • devtools installation  │  │
-                            │  └────────────────────────────┘  │
-                            │                                  │
-                            │  cloud-init: essentials + agent  │
-                            └──────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph local["Your Machine"]
+        cli["spuff CLI"]
+        agent_keys["SSH Agent<br/>(keys)"]
+        sshfs["SSHFS<br/>Mount"]
+        localdir[("~/project")]
+    end
+
+    subgraph cloud["Cloud VM"]
+        sshd["sshd"]
+        subgraph services["Services"]
+            docker["Docker"]
+            tailscale["Tailscale"]
+        end
+        subgraph spuff_agent["spuff-agent :7575"]
+            metrics["metrics"]
+            idle["idle detection"]
+            devtools["devtools"]
+            volumes["volume manager"]
+        end
+        remotedir[("/home/dev/project")]
+    end
+
+    cli -->|"SSH -A"| sshd
+    agent_keys -.->|"forward"| sshd
+    cli -->|"tunnel :7575"| spuff_agent
+    cli -->|"port forward"| services
+    sshfs <-->|"bidirectional sync"| remotedir
+    localdir --- sshfs
 ```
 
 **Components:**
 
 - **spuff CLI** — Local tool for managing environments
-- **spuff-agent** — Daemon running on VM for monitoring, devtools installation, and management
-- **cloud-init** — Fast bootstrap with essentials (~30s), devtools installed async via agent
+- **spuff-agent** — Daemon on VM for metrics, idle detection, devtools, and volume management
+- **SSHFS** — Bidirectional file sync between local and remote directories
+- **SSH Tunnels** — Port forwarding for services (databases, web servers, etc.)
+- **cloud-init** — Fast bootstrap (~30s), devtools installed async via agent
 
 ## Roadmap
 
@@ -225,6 +247,8 @@ tailscale_authkey: tskey-auth-xxx  # or use TS_AUTHKEY env var
 - [x] Idle auto-destroy
 - [x] Remote agent with metrics
 - [x] Tailscale integration
+- [x] Volume mounts (SSHFS bidirectional sync)
+- [x] Port tunneling from project config
 
 ### Next (v0.2)
 - [ ] Hetzner Cloud provider
@@ -266,18 +290,25 @@ cargo build --release
 ```
 src/
 ├── main.rs              # CLI entry point
-├── cli/                 # Command definitions
+├── cli/                 # Command definitions (up, down, ssh, volume, etc.)
 ├── config.rs            # Configuration management
+├── project_config.rs    # Per-project spuff.yaml parsing
 ├── provider/            # Cloud provider implementations
 │   ├── mod.rs           # Provider trait
 │   └── digitalocean.rs  # DigitalOcean implementation
 ├── connector/           # SSH connectivity
 ├── environment/         # Cloud-init generation
+├── volume/              # SSHFS volume management
+│   ├── config.rs        # Volume configuration
+│   ├── driver.rs        # VolumeDriver trait
+│   ├── drivers/sshfs.rs # SSHFS implementation
+│   └── state.rs         # Local mount state tracking
 ├── agent/               # Remote agent (separate binary)
 │   ├── main.rs
 │   ├── routes.rs
 │   ├── metrics.rs
-│   └── devtools.rs      # Async devtools installation manager
+│   ├── devtools.rs      # Async devtools installation manager
+│   └── volume_manager.rs # Remote volume management
 ├── state.rs             # Local SQLite state
 └── utils.rs             # Shared utilities
 ```

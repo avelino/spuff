@@ -90,7 +90,10 @@ pub async fn run_command(host: &str, config: &AppConfig, command: &str) -> Resul
                     .to_string(),
             ));
         }
-        return Err(SpuffError::Ssh(format!("Command failed: {}", output.stderr)));
+        return Err(SpuffError::Ssh(format!(
+            "Command failed: {}",
+            output.stderr
+        )));
     }
 
     Ok(output.stdout)

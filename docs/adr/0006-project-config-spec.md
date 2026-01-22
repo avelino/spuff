@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-spuff currently uses a global configuration file (`~/.config/spuff/config.yaml`) for all environments. While this works for basic usage, teams and projects often need:
+spuff currently uses a global configuration file (`~/.spuff/config.yaml`) for all environments. While this works for basic usage, teams and projects often need:
 
 1. **Reproducible environments** - Every developer should get the same setup
 2. **Project-specific tooling** - Different projects need different language stacks
@@ -56,23 +56,33 @@ We will implement a **project-level configuration specification** via `spuff.yam
 
 ### 3. Implementation Architecture
 
-```
-CLI (spuff up)
-    │
-    ├─ Load spuff.yaml from CWD
-    ├─ Merge with global config
-    ├─ Embed as project.json in cloud-init
-    │
-    └─ VM boots → agent starts
-         │
-         └─ Agent reads /opt/spuff/project.json
-              │
-              ├─ Install bundles (async)
-              ├─ Install packages
-              ├─ Clone repositories
-              ├─ Start services (docker-compose)
-              ├─ Run setup scripts
-              └─ Execute hooks
+```mermaid
+flowchart TB
+    subgraph cli["CLI (spuff up)"]
+        load["Load spuff.yaml from CWD"]
+        merge["Merge with global config"]
+        embed["Embed as project.json in cloud-init"]
+        load --> merge --> embed
+    end
+
+    subgraph vm["VM boots → agent starts"]
+        read["Agent reads /opt/spuff/project.json"]
+        bundles["Install bundles (async)"]
+        packages["Install packages"]
+        repos["Clone repositories"]
+        services["Start services (docker-compose)"]
+        scripts["Run setup scripts"]
+        hooks["Execute hooks"]
+
+        read --> bundles
+        read --> packages
+        read --> repos
+        read --> services
+        packages --> scripts
+        scripts --> hooks
+    end
+
+    embed --> vm
 ```
 
 ### 4. What We Will NOT Do

@@ -36,7 +36,11 @@ pub struct InstanceRequest {
 
 impl InstanceRequest {
     /// Create a new instance request with required fields
-    pub fn new(name: impl Into<String>, region: impl Into<String>, size: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        region: impl Into<String>,
+        size: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             region: region.into(),
@@ -151,12 +155,12 @@ pub struct ProviderTimeouts {
 impl Default for ProviderTimeouts {
     fn default() -> Self {
         Self {
-            instance_ready: Duration::from_secs(300),   // 5 minutes
-            action_complete: Duration::from_secs(600),  // 10 minutes
+            instance_ready: Duration::from_secs(300),  // 5 minutes
+            action_complete: Duration::from_secs(600), // 10 minutes
             poll_interval: Duration::from_secs(5),
             http_request: Duration::from_secs(30),
-            ssh_connect: Duration::from_secs(300),      // 5 minutes
-            cloud_init: Duration::from_secs(600),       // 10 minutes
+            ssh_connect: Duration::from_secs(300), // 5 minutes
+            cloud_init: Duration::from_secs(600),  // 10 minutes
         }
     }
 }
@@ -292,8 +296,14 @@ mod tests {
             ProviderType::from_str("digitalocean"),
             Some(ProviderType::DigitalOcean)
         );
-        assert_eq!(ProviderType::from_str("do"), Some(ProviderType::DigitalOcean));
-        assert_eq!(ProviderType::from_str("hetzner"), Some(ProviderType::Hetzner));
+        assert_eq!(
+            ProviderType::from_str("do"),
+            Some(ProviderType::DigitalOcean)
+        );
+        assert_eq!(
+            ProviderType::from_str("hetzner"),
+            Some(ProviderType::Hetzner)
+        );
         assert_eq!(ProviderType::from_str("aws"), Some(ProviderType::Aws));
         assert_eq!(ProviderType::from_str("unknown"), None);
     }

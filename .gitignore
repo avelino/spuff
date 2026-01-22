@@ -29,3 +29,8 @@ AGENTS.md
 .aider*
 .continue/
 copilot-*
+
+# project
+spuff.yaml
+data/
+data-*/

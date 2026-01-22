@@ -96,6 +96,73 @@ async fn io_loop(channel: &mut russh::Channel<russh::client::Msg>) -> Result<()>
 }
 
 /// Main I/O loop that returns exit code.
+#[cfg(unix)]
+async fn io_loop_with_exit(channel: &mut russh::Channel<russh::client::Msg>) -> Result<u32> {
+    let mut exit_code = 0u32;
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    // Input buffer
+    let mut input_buf = [0u8; 1024];
+
+    // Set up signal handler for Ctrl+C
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|e| SpuffError::Ssh(format!("Failed to set up signal handler: {}", e)))?;
+
+    loop {
+        tokio::select! {
+            // Handle Ctrl+C signal - break cleanly to allow Drop to run
+            _ = sigint.recv() => {
+                tracing::debug!("Received SIGINT, closing session");
+                break;
+            }
+
+            // Read from stdin and send to remote
+            result = stdin.read(&mut input_buf) => {
+                match result {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        channel.data(&input_buf[..n]).await
+                            .map_err(|e| SpuffError::Ssh(format!("Failed to send data: {}", e)))?;
+                    }
+                    Err(e) => {
+                        tracing::warn!("stdin read error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Read from remote and write to stdout
+            msg = channel.wait() => {
+                match msg {
+                    Some(ChannelMsg::Data { data }) => {
+                        stdout.write_all(&data).await
+                            .map_err(|e| SpuffError::Ssh(format!("Failed to write to stdout: {}", e)))?;
+                        stdout.flush().await.ok();
+                    }
+                    Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                        // stderr
+                        let mut stderr = tokio::io::stderr();
+                        stderr.write_all(&data).await.ok();
+                        stderr.flush().await.ok();
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        exit_code = exit_status;
+                    }
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(exit_code)
+}
+
+/// Main I/O loop that returns exit code (non-Unix fallback).
+#[cfg(not(unix))]
 async fn io_loop_with_exit(channel: &mut russh::Channel<russh::client::Msg>) -> Result<u32> {
     let mut exit_code = 0u32;
     let mut stdin = tokio::io::stdin();
@@ -157,18 +224,63 @@ fn get_terminal_size() -> (u16, u16) {
 
 /// Set up raw terminal mode.
 fn setup_raw_terminal() -> Result<RawModeGuard> {
+    // Create guard first to save original terminal state
+    let guard = RawModeGuard::new();
+
     crossterm::terminal::enable_raw_mode()
         .map_err(|e| SpuffError::Ssh(format!("Failed to enable raw mode: {}", e)))?;
 
-    Ok(RawModeGuard)
+    Ok(guard)
 }
 
 /// RAII guard to restore terminal mode on drop.
-struct RawModeGuard;
+struct RawModeGuard {
+    #[cfg(unix)]
+    original_termios: Option<nix::sys::termios::Termios>,
+}
+
+impl RawModeGuard {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use nix::sys::termios;
+
+            // Save original terminal settings
+            let original = termios::tcgetattr(std::io::stdin()).ok();
+            Self {
+                original_termios: original,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+}
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        // First disable crossterm's raw mode
         let _ = crossterm::terminal::disable_raw_mode();
+
+        #[cfg(unix)]
+        {
+            use nix::sys::termios;
+
+            // Restore original terminal settings if we have them
+            if let Some(ref original) = self.original_termios {
+                let _ = termios::tcsetattr(std::io::stdin(), termios::SetArg::TCSANOW, original);
+            }
+
+            // Run stty sane to ensure terminal is in a clean state
+            // This is what you'd do manually if the terminal is messed up
+            let _ = std::process::Command::new("stty")
+                .arg("sane")
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
 }
 

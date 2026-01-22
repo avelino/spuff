@@ -9,7 +9,9 @@ use crate::error::Result;
 #[command(name = "spuff")]
 #[command(version)]
 #[command(about = "Ephemeral dev environments in the cloud")]
-#[command(long_about = "Spin up cloud VMs with your dev environment, auto-destroy when idle.\n\nNo more forgotten instances. No surprise bills.")]
+#[command(
+    long_about = "Spin up cloud VMs with your dev environment, auto-destroy when idle.\n\nNo more forgotten instances. No surprise bills."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -45,6 +47,11 @@ pub enum Commands {
         /// Development mode: upload local spuff-agent binary instead of downloading from GitHub
         #[arg(long)]
         dev: bool,
+
+        /// AI coding tools to install: "all", "none", "ask", or comma-separated list
+        /// (e.g., "claude-code,codex"). Overrides project and global config.
+        #[arg(long, value_name = "TOOLS")]
+        ai_tools: Option<String>,
     },
 
     /// Destroy the current environment
@@ -133,6 +140,18 @@ pub enum Commands {
         /// Command to execute
         command: String,
     },
+
+    /// Manage AI coding tools
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
+
+    /// Manage volume mounts
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -169,6 +188,27 @@ pub enum ConfigCommands {
 
     /// Open configuration file in editor
     Edit,
+}
+
+#[derive(Subcommand)]
+pub enum AiCommands {
+    /// List available AI coding tools
+    List,
+
+    /// Show AI tools installation status on remote environment
+    Status,
+
+    /// Install a specific AI tool on the remote environment
+    Install {
+        /// Tool to install: claude-code, codex, or opencode
+        tool: String,
+    },
+
+    /// Show information about a specific AI tool
+    Info {
+        /// Tool name: claude-code, codex, or opencode
+        tool: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -212,6 +252,39 @@ pub enum AgentCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum VolumeCommands {
+    /// List configured volumes
+    #[command(name = "ls")]
+    List,
+
+    /// Show detailed volume status
+    Status,
+
+    /// Mount volumes (from config or ad-hoc)
+    Mount {
+        /// Volume spec: remote_path:local_mount or remote_path:local_mount:ro
+        /// If not provided, mounts all volumes from spuff.yaml
+        spec: Option<String>,
+    },
+
+    /// Unmount a volume
+    Unmount {
+        /// Target path to unmount
+        target: Option<String>,
+
+        /// Unmount all volumes
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Remount volumes (useful after connection issues)
+    Remount {
+        /// Specific target to remount (default: all)
+        target: Option<String>,
+    },
+}
+
 impl Cli {
     pub async fn execute(self) -> Result<()> {
         match self.command {
@@ -222,9 +295,11 @@ impl Cli {
                 region,
                 no_connect,
                 dev,
+                ai_tools,
             } => {
                 let config = AppConfig::load()?;
-                commands::up::execute(&config, size, snapshot, region, no_connect, dev).await
+                commands::up::execute(&config, size, snapshot, region, no_connect, dev, ai_tools)
+                    .await
             }
             Commands::Down { snapshot, force } => {
                 let config = AppConfig::load()?;
@@ -248,7 +323,10 @@ impl Cli {
                 lines,
             } => {
                 let config = AppConfig::load()?;
-                commands::logs::execute(&config, bundle, packages, repos, services, script, follow, lines).await
+                commands::logs::execute(
+                    &config, bundle, packages, repos, services, script, follow, lines,
+                )
+                .await
             }
             Commands::Tunnel { port, stop } => {
                 let config = AppConfig::load()?;
@@ -261,7 +339,9 @@ impl Cli {
                         commands::snapshot::create(&config, name).await
                     }
                     SnapshotCommands::List => commands::snapshot::list(&config).await,
-                    SnapshotCommands::Delete { id } => commands::snapshot::delete(&config, id).await,
+                    SnapshotCommands::Delete { id } => {
+                        commands::snapshot::delete(&config, id).await
+                    }
                 }
             }
             Commands::Config { command } => match command {
@@ -289,6 +369,31 @@ impl Cli {
             Commands::Exec { command } => {
                 let config = AppConfig::load()?;
                 commands::agent::exec(&config, command).await
+            }
+            Commands::Ai { command } => {
+                let config = AppConfig::load()?;
+                match command {
+                    AiCommands::List => commands::ai::list().await,
+                    AiCommands::Status => commands::ai::status(&config).await,
+                    AiCommands::Install { tool } => commands::ai::install(&config, tool).await,
+                    AiCommands::Info { tool } => commands::ai::info(&tool).await,
+                }
+            }
+            Commands::Volume { command } => {
+                let config = AppConfig::load()?;
+                match command {
+                    VolumeCommands::List => commands::volume::list(&config).await,
+                    VolumeCommands::Status => commands::volume::status(&config).await,
+                    VolumeCommands::Mount { spec } => {
+                        commands::volume::mount(&config, spec.as_deref()).await
+                    }
+                    VolumeCommands::Unmount { target, all } => {
+                        commands::volume::unmount(&config, target, all).await
+                    }
+                    VolumeCommands::Remount { target } => {
+                        commands::volume::remount(&config, target).await
+                    }
+                }
             }
         }
     }

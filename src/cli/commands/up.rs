@@ -7,23 +7,36 @@ use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
 use crate::connector::ssh::{wait_for_ssh, wait_for_ssh_login};
-use crate::environment::cloud_init::generate_cloud_init;
+use crate::environment::cloud_init::generate_cloud_init_with_ai_tools;
 use crate::error::{Result, SpuffError};
-use crate::project_config::ProjectConfig;
+use crate::project_config::{AiToolsConfig, ProjectConfig};
 use crate::provider::{create_provider, ImageSpec, InstanceRequest};
-use crate::ssh::{is_key_in_agent, key_has_passphrase, is_ssh_agent_running};
+use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase, SshClient, SshConfig};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
+use crate::volume::{get_install_instructions, SshfsDriver, SshfsLocalCommands, VolumeState};
 
 const STEP_CLOUD_INIT: usize = 0;
 const STEP_CREATE: usize = 1;
 const STEP_WAIT_READY: usize = 2;
 const STEP_WAIT_SSH: usize = 3;
 const STEP_BOOTSTRAP: usize = 4;
+const STEP_VOLUMES: usize = 5;
 
 // Bootstrap sub-steps (indices) - minimal bootstrap, devtools installed via agent
 const SUB_PACKAGES: usize = 0;
 const SUB_AGENT: usize = 1;
+
+/// Parameters for instance provisioning
+struct ProvisionParams {
+    config: AppConfig,
+    size: Option<String>,
+    snapshot: Option<String>,
+    region: Option<String>,
+    project_config: Option<ProjectConfig>,
+    cli_ai_tools: Option<AiToolsConfig>,
+    dev: bool,
+}
 
 pub async fn execute(
     config: &AppConfig,
@@ -32,6 +45,7 @@ pub async fn execute(
     region: Option<String>,
     no_connect: bool,
     dev: bool,
+    ai_tools: Option<String>,
 ) -> Result<()> {
     let db = StateDb::open()?;
 
@@ -51,20 +65,81 @@ pub async fn execute(
     }
 
     // Load project config from spuff.yaml (if exists)
-    let project_config = ProjectConfig::load_from_cwd()
-        .ok()
-        .flatten();
+    let project_config = ProjectConfig::load_from_cwd().ok().flatten();
 
     // Apply project config overrides (CLI args take precedence)
     let effective_size = size.or_else(|| {
-        project_config.as_ref().and_then(|p| p.resources.size.clone())
+        project_config
+            .as_ref()
+            .and_then(|p| p.resources.size.clone())
     });
     let effective_region = region.or_else(|| {
-        project_config.as_ref().and_then(|p| p.resources.region.clone())
+        project_config
+            .as_ref()
+            .and_then(|p| p.resources.region.clone())
     });
+
+    // Process AI tools configuration
+    // Priority: CLI > Project config > Global config > Default (all)
+    let cli_ai_tools = match ai_tools.as_deref() {
+        Some("ask") => {
+            // Interactive mode - prompt user to select AI tools
+            println!(
+                "{} Select AI coding tools to install:",
+                style("?").cyan().bold()
+            );
+            println!("  1. {} (Anthropic)", style("claude-code").cyan());
+            println!("  2. {} (OpenAI)", style("codex").cyan());
+            println!("  3. {} (open source)", style("opencode").cyan());
+            println!("  a. {} - install all", style("all").green());
+            println!("  n. {} - install none", style("none").yellow());
+            println!();
+            print!("Enter your choice (comma-separated numbers, 'all', or 'none'): ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            let input = input.trim().to_lowercase();
+
+            Some(match input.as_str() {
+                "a" | "all" => AiToolsConfig::All,
+                "n" | "none" => AiToolsConfig::None,
+                _ => {
+                    let tools: Vec<String> = input
+                        .split(',')
+                        .filter_map(|s| match s.trim() {
+                            "1" | "claude-code" => Some("claude-code".to_string()),
+                            "2" | "codex" => Some("codex".to_string()),
+                            "3" | "opencode" => Some("opencode".to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if tools.is_empty() {
+                        AiToolsConfig::All
+                    } else {
+                        AiToolsConfig::List(tools)
+                    }
+                }
+            })
+        }
+        Some(arg) => Some(AiToolsConfig::from_cli_arg(arg)),
+        None => None, // Will use project/global config defaults
+    };
 
     // Pre-flight check: verify SSH key is usable
     verify_ssh_key_accessible(config).await?;
+
+    // Pre-flight check: verify SSHFS is available if volumes are configured
+    // Check both global config volumes and project volumes
+    let has_volumes = !config.volumes.is_empty()
+        || project_config
+            .as_ref()
+            .map(|pc| !pc.volumes.is_empty())
+            .unwrap_or(false);
+    if has_volumes {
+        verify_sshfs_available().await?;
+    }
 
     // In dev mode, build agent for Linux and upload
     if dev {
@@ -83,11 +158,7 @@ pub async fn execute(
                 );
             }
             Err(e) => {
-                println!(
-                    "{} Failed to build agent: {}",
-                    style("✕").red().bold(),
-                    e
-                );
+                println!("{} Failed to build agent: {}", style("✕").red().bold(), e);
                 return Err(e);
             }
         }
@@ -103,6 +174,7 @@ pub async fn execute(
         "Waiting for instance".to_string(),
         "Waiting for SSH".to_string(),
         "Running bootstrap".to_string(),
+        "Mounting volumes".to_string(),
     ];
 
     if dev {
@@ -115,25 +187,18 @@ pub async fn execute(
     }
 
     // Clone config values for the async task
-    let config_clone = config.clone();
-    let region_clone = effective_region.clone();
-    let size_clone = effective_size.clone();
-    let snapshot_clone = snapshot.clone();
-    let project_config_clone = project_config.clone();
+    let params = ProvisionParams {
+        config: config.clone(),
+        size: effective_size.clone(),
+        snapshot: snapshot.clone(),
+        region: effective_region.clone(),
+        project_config: project_config.clone(),
+        cli_ai_tools: cli_ai_tools.clone(),
+        dev,
+    };
 
     // Spawn the provisioning task
-    let provision_task = tokio::spawn(async move {
-        provision_instance(
-            &config_clone,
-            size_clone,
-            snapshot_clone,
-            region_clone,
-            project_config_clone,
-            dev,
-            tx,
-        )
-        .await
-    });
+    let provision_task = tokio::spawn(async move { provision_instance(params, tx).await });
 
     // Run the TUI
     let tui_result = run_progress_ui(steps, rx).await;
@@ -183,7 +248,7 @@ pub async fn execute(
     Ok(())
 }
 
-const STEP_UPLOAD_AGENT: usize = 5;
+const STEP_UPLOAD_AGENT: usize = 6;
 
 /// Linux x86_64 target for cross-compilation (musl for static linking)
 const LINUX_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -261,19 +326,53 @@ async fn build_linux_agent() -> Result<String> {
     // Determine which build tool to use (in order of preference)
     let (cmd, args): (String, Vec<&str>) = if has_cargo_zigbuild().await {
         // cargo-zigbuild: best option for macOS, no Docker needed
-        (cargo.clone(), vec!["zigbuild", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cargo.clone(),
+            vec![
+                "zigbuild",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     } else if has_cross().await {
         // cross: requires Docker but works well
         let cross_path = if let Ok(home) = std::env::var("HOME") {
             let path = format!("{}/.cargo/bin/cross", home);
-            if std::path::Path::new(&path).exists() { path } else { "cross".to_string() }
+            if std::path::Path::new(&path).exists() {
+                path
+            } else {
+                "cross".to_string()
+            }
         } else {
             "cross".to_string()
         };
-        (cross_path, vec!["build", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cross_path,
+            vec![
+                "build",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     } else {
         // Fallback to cargo (requires linker setup)
-        (cargo.clone(), vec!["build", "--release", "--bin", "spuff-agent", "--target", LINUX_TARGET])
+        (
+            cargo.clone(),
+            vec![
+                "build",
+                "--release",
+                "--bin",
+                "spuff-agent",
+                "--target",
+                LINUX_TARGET,
+            ],
+        )
     };
 
     println!(
@@ -388,6 +487,41 @@ fn print_project_summary(project_config: &ProjectConfig) {
         );
     }
 
+    // Show volumes if configured
+    if !project_config.volumes.is_empty() {
+        let count = project_config.volumes.len();
+        println!(
+            "  {}  {:<56} {}",
+            style("│").dim(),
+            format!("Volumes: {} mount(s)", count),
+            style("│").dim()
+        );
+    }
+
+    // Show AI tools config if not default (all)
+    match &project_config.ai_tools {
+        AiToolsConfig::None => {
+            println!(
+                "  {}  {:<56} {}",
+                style("│").dim(),
+                format!("AI tools: {}", style("none").yellow()),
+                style("│").dim()
+            );
+        }
+        AiToolsConfig::List(tools) => {
+            let tools_str = tools.join(", ");
+            println!(
+                "  {}  {:<56} {}",
+                style("│").dim(),
+                format!("AI tools: {}", tools_str),
+                style("│").dim()
+            );
+        }
+        AiToolsConfig::All => {
+            // Default - don't print anything
+        }
+    }
+
     println!(
         "  {}",
         style("╰──────────────────────────────────────────────────────────╯").dim()
@@ -396,26 +530,30 @@ fn print_project_summary(project_config: &ProjectConfig) {
 }
 
 async fn provision_instance(
-    config: &AppConfig,
-    size: Option<String>,
-    snapshot: Option<String>,
-    region: Option<String>,
-    project_config: Option<ProjectConfig>,
-    dev: bool,
+    params: ProvisionParams,
     tx: mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
     let db = StateDb::open()?;
-    let provider = create_provider(config)?;
+    let provider = create_provider(&params.config)?;
 
     // Step 1: Generate cloud-init
-    tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Preparing environment configuration...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_CLOUD_INIT,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Preparing environment configuration...".to_string(),
+    ))
+    .await
+    .ok();
 
-    let user_data = generate_cloud_init(config, project_config.as_ref())?;
+    let user_data = generate_cloud_init_with_ai_tools(
+        &params.config,
+        params.project_config.as_ref(),
+        params.cli_ai_tools.as_ref(),
+    )?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();
@@ -424,20 +562,28 @@ async fn provision_instance(
     tx.send(ProgressMessage::SetStep(STEP_CREATE, StepState::InProgress))
         .await
         .ok();
-    tx.send(ProgressMessage::SetDetail("Requesting VM from provider...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Requesting VM from provider...".to_string(),
+    ))
+    .await
+    .ok();
 
     let instance_name = generate_instance_name();
-    let instance_region = region.unwrap_or_else(|| config.region.clone());
-    let instance_size = size.unwrap_or_else(|| config.size.clone());
-    let image = get_image_spec(&config.provider, snapshot);
+    let instance_region = params
+        .region
+        .unwrap_or_else(|| params.config.region.clone());
+    let instance_size = params.size.unwrap_or_else(|| params.config.size.clone());
+    let image = get_image_spec(&params.config.provider, params.snapshot);
 
-    let request = InstanceRequest::new(instance_name.clone(), instance_region.clone(), instance_size.clone())
-        .with_image(image)
-        .with_user_data(user_data)
-        .with_label("spuff", "true")
-        .with_label("managed-by", "spuff-cli");
+    let request = InstanceRequest::new(
+        instance_name.clone(),
+        instance_region.clone(),
+        instance_size.clone(),
+    )
+    .with_image(image)
+    .with_user_data(user_data)
+    .with_label("spuff", "true")
+    .with_label("managed-by", "spuff-cli");
 
     let instance = match provider.create_instance(&request).await {
         Ok(i) => i,
@@ -455,12 +601,17 @@ async fn provision_instance(
         .ok();
 
     // Step 3: Wait for instance to be ready
-    tx.send(ProgressMessage::SetStep(STEP_WAIT_READY, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Waiting for VM to be assigned an IP...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_WAIT_READY,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Waiting for VM to be assigned an IP...".to_string(),
+    ))
+    .await
+    .ok();
 
     let instance = match provider.wait_ready(&instance.id).await {
         Ok(i) => i,
@@ -477,7 +628,7 @@ async fn provision_instance(
     let local_instance = LocalInstance::from_provider(
         &instance,
         instance_name.clone(),
-        config.provider.clone(),
+        params.config.provider.clone(),
         instance_region.clone(),
         instance_size.clone(),
     );
@@ -488,12 +639,18 @@ async fn provision_instance(
         .ok();
 
     // Step 4: Wait for SSH
-    tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail(format!("Waiting for SSH port on {}...", instance.ip)))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_WAIT_SSH,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(format!(
+        "Waiting for SSH port on {}...",
+        instance.ip
+    )))
+    .await
+    .ok();
 
     // First wait for SSH port to be open
     if let Err(e) = wait_for_ssh(&instance.ip.to_string(), 22, Duration::from_secs(300)).await {
@@ -505,11 +662,20 @@ async fn provision_instance(
     }
 
     // Then wait for user to exist and SSH login to work
-    tx.send(ProgressMessage::SetDetail(format!("Waiting for user {}...", config.ssh_user)))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetDetail(format!(
+        "Waiting for user {}...",
+        params.config.ssh_user
+    )))
+    .await
+    .ok();
 
-    if let Err(e) = wait_for_ssh_login(&instance.ip.to_string(), config, Duration::from_secs(120)).await {
+    if let Err(e) = wait_for_ssh_login(
+        &instance.ip.to_string(),
+        &params.config,
+        Duration::from_secs(120),
+    )
+    .await
+    {
         tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
             .await
             .ok();
@@ -522,25 +688,36 @@ async fn provision_instance(
         .ok();
 
     // In dev mode, upload local agent binary
-    if dev {
-        tx.send(ProgressMessage::SetStep(STEP_UPLOAD_AGENT, StepState::InProgress))
-            .await
-            .ok();
-        tx.send(ProgressMessage::SetDetail("Uploading local spuff-agent...".to_string()))
-            .await
-            .ok();
+    if params.dev {
+        tx.send(ProgressMessage::SetStep(
+            STEP_UPLOAD_AGENT,
+            StepState::InProgress,
+        ))
+        .await
+        .ok();
+        tx.send(ProgressMessage::SetDetail(
+            "Uploading local spuff-agent...".to_string(),
+        ))
+        .await
+        .ok();
 
         let agent_path = get_linux_agent_path();
         let ip_str = instance.ip.to_string();
 
         // Upload the binary
-        if let Err(e) = upload_local_agent(&ip_str, config, &agent_path).await {
-            tx.send(ProgressMessage::SetStep(STEP_UPLOAD_AGENT, StepState::Failed))
-                .await
-                .ok();
-            tx.send(ProgressMessage::SetDetail(format!("Agent upload failed: {}", e)))
-                .await
-                .ok();
+        if let Err(e) = upload_local_agent(&ip_str, &params.config, &agent_path).await {
+            tx.send(ProgressMessage::SetStep(
+                STEP_UPLOAD_AGENT,
+                StepState::Failed,
+            ))
+            .await
+            .ok();
+            tx.send(ProgressMessage::SetDetail(format!(
+                "Agent upload failed: {}",
+                e
+            )))
+            .await
+            .ok();
             // Don't fail the whole process, just warn
             tracing::warn!("Failed to upload local agent: {}", e);
         } else {
@@ -551,9 +728,12 @@ async fn provision_instance(
     }
 
     // Step 5/6: Wait for cloud-init with sub-steps
-    tx.send(ProgressMessage::SetStep(STEP_BOOTSTRAP, StepState::InProgress))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetStep(
+        STEP_BOOTSTRAP,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
 
     // Define sub-steps for bootstrap (minimal - devtools installed via agent)
     let sub_steps = vec![
@@ -566,7 +746,9 @@ async fn provision_instance(
         .ok();
 
     // Wait for cloud-init with progress tracking
-    if let Err(e) = wait_for_cloud_init_with_progress(&instance.ip.to_string(), config, &tx).await {
+    if let Err(e) =
+        wait_for_cloud_init_with_progress(&instance.ip.to_string(), &params.config, &tx).await
+    {
         tracing::warn!("Cloud-init wait failed: {}", e);
         // Don't fail the whole process, just warn
     }
@@ -575,12 +757,168 @@ async fn provision_instance(
         .await
         .ok();
 
-    // Trigger devtools installation via agent (async, non-blocking)
-    tx.send(ProgressMessage::SetDetail("Triggering devtools installation...".to_string()))
+    // Step: Mount volumes (if configured)
+    // Merge global volumes with project volumes (project volumes override global by target)
+    tx.send(ProgressMessage::SetStep(
+        STEP_VOLUMES,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+
+    // Build merged volume list: global volumes first, then project volumes
+    // Project volumes with same target override global ones
+    let mut merged_volumes: Vec<(crate::volume::VolumeConfig, Option<&std::path::Path>)> =
+        Vec::new();
+
+    // Add global volumes (no base_dir)
+    for vol in &params.config.volumes {
+        merged_volumes.push((vol.clone(), None));
+    }
+
+    // Add project volumes (with base_dir), overriding globals with same target
+    if let Some(ref pc) = params.project_config {
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            merged_volumes.retain(|(v, _)| v.target != vol.target);
+            merged_volumes.push((vol.clone(), pc.base_dir.as_deref()));
+        }
+    }
+
+    if !merged_volumes.is_empty() {
+        // Check SSHFS availability
+        let sshfs_available = SshfsDriver::check_sshfs_installed().await;
+        let fuse_available = SshfsDriver::check_fuse_available().await;
+
+        if !sshfs_available || !fuse_available {
+            tx.send(ProgressMessage::SetDetail(
+                "SSHFS not available - skipping volume mount".to_string(),
+            ))
+            .await
+            .ok();
+            tracing::warn!("SSHFS not available, skipping volume mount");
+        } else {
+            let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
+                .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
+            let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
+
+            let mut mounted_count = 0;
+            let total_volumes = merged_volumes.len();
+
+            for (idx, (vol, base_dir)) in merged_volumes.iter().enumerate() {
+                let mount_point = vol.resolve_mount_point(Some(&instance_name), *base_dir);
+                let source_path = vol.resolve_source(*base_dir);
+
+                // Check if this is a file volume (SSHFS doesn't support mounting files)
+                // Use async version that checks remotely via SSH when local source doesn't exist
+                let is_file = is_file_volume_async(
+                    &source_path,
+                    &vol.target,
+                    &instance.ip.to_string(),
+                    &params.config.ssh_user,
+                    &ssh_key_str,
+                )
+                .await;
+
+                tx.send(ProgressMessage::SetDetail(format!(
+                    "{} volume {}/{}: {}",
+                    if is_file { "Syncing" } else { "Mounting" },
+                    idx + 1,
+                    total_volumes,
+                    vol.target
+                )))
+                .await
+                .ok();
+
+                // Sync source to VM if defined
+                if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
+                    if let Err(e) = sync_to_vm(
+                        &instance.ip.to_string(),
+                        &params.config.ssh_user,
+                        &ssh_key_str,
+                        &source_path,
+                        &vol.target,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
+                    } else if is_file {
+                        // For files, sync counts as success (no SSHFS mount)
+                        mounted_count += 1;
+                    }
+                }
+
+                // Skip SSHFS mount for files (not supported)
+                if is_file {
+                    tracing::debug!(
+                        "Skipping SSHFS mount for file volume: {} (SSHFS only supports directories)",
+                        vol.target
+                    );
+                    continue;
+                }
+
+                // Mount the directory volume
+                match SshfsLocalCommands::mount(
+                    &instance.ip.to_string(),
+                    &params.config.ssh_user,
+                    &ssh_key_str,
+                    &vol.target,
+                    &mount_point,
+                    vol.read_only,
+                    &vol.options,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        mounted_count += 1;
+                        // Save to volume state
+                        let mut state = VolumeState::load_or_default();
+                        let handle =
+                            crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
+                                .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
+                                .with_source(&source_path)
+                                .with_read_only(vol.read_only);
+                        state.add_mount(handle);
+                        if let Err(e) = state.save() {
+                            tracing::error!(
+                                "Failed to save volume state: {}. Mount may not persist.",
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to mount {}: {}", vol.target, e);
+                    }
+                }
+            }
+
+            tx.send(ProgressMessage::SetDetail(format!(
+                "Mounted {}/{} volume(s)",
+                mounted_count, total_volumes
+            )))
+            .await
+            .ok();
+        }
+    } else {
+        tx.send(ProgressMessage::SetDetail(
+            "No volumes configured".to_string(),
+        ))
+        .await
+        .ok();
+    }
+
+    tx.send(ProgressMessage::SetStep(STEP_VOLUMES, StepState::Done))
         .await
         .ok();
 
-    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), config).await {
+    // Trigger devtools installation via agent (async, non-blocking)
+    tx.send(ProgressMessage::SetDetail(
+        "Triggering devtools installation...".to_string(),
+    ))
+    .await
+    .ok();
+
+    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), &params.config).await {
         tracing::warn!("Failed to trigger devtools installation: {}", e);
         // Don't fail - user can trigger manually with `spuff agent devtools install`
     }
@@ -641,12 +979,18 @@ async fn wait_for_cloud_init_with_progress(
     let mut agent_done = false;
 
     // Start first sub-step
-    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::InProgress))
-        .await
-        .ok();
-    tx.send(ProgressMessage::SetDetail("Updating system packages...".to_string()))
-        .await
-        .ok();
+    tx.send(ProgressMessage::SetSubStep(
+        STEP_BOOTSTRAP,
+        SUB_PACKAGES,
+        StepState::InProgress,
+    ))
+    .await
+    .ok();
+    tx.send(ProgressMessage::SetDetail(
+        "Updating system packages...".to_string(),
+    ))
+    .await
+    .ok();
 
     for _ in 0..max_attempts {
         // Check cloud-init log for progress
@@ -657,26 +1001,41 @@ async fn wait_for_cloud_init_with_progress(
                 && (log.contains("Setting up") || log.contains("Unpacking"))
             {
                 packages_done = true;
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_PACKAGES, StepState::Done))
-                    .await
-                    .ok();
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::InProgress))
-                    .await
-                    .ok();
-                tx.send(ProgressMessage::SetDetail("Installing spuff-agent...".to_string()))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_PACKAGES,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_AGENT,
+                    StepState::InProgress,
+                ))
+                .await
+                .ok();
+                tx.send(ProgressMessage::SetDetail(
+                    "Installing spuff-agent...".to_string(),
+                ))
+                .await
+                .ok();
             }
 
             // Check for spuff-agent installation
             if !agent_done
                 && log.contains("spuff-agent")
-                && (log.contains("systemctl enable spuff-agent") || log.contains("systemctl start spuff-agent"))
+                && (log.contains("systemctl enable spuff-agent")
+                    || log.contains("systemctl start spuff-agent"))
             {
                 agent_done = true;
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, SUB_AGENT, StepState::Done))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    SUB_AGENT,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
                 tx.send(ProgressMessage::SetDetail("Finalizing...".to_string()))
                     .await
                     .ok();
@@ -686,9 +1045,13 @@ async fn wait_for_cloud_init_with_progress(
             if log.contains("spuff environment ready") || log.contains("final_message") {
                 // Mark any remaining sub-steps as done
                 for i in 0..2 {
-                    tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
-                        .await
-                        .ok();
+                    tx.send(ProgressMessage::SetSubStep(
+                        STEP_BOOTSTRAP,
+                        i,
+                        StepState::Done,
+                    ))
+                    .await
+                    .ok();
                 }
                 return Ok(());
             }
@@ -698,9 +1061,13 @@ async fn wait_for_cloud_init_with_progress(
         if let Ok(true) = check_cloud_init_status(ip, config).await {
             // Mark any remaining sub-steps as done
             for i in 0..2 {
-                tx.send(ProgressMessage::SetSubStep(STEP_BOOTSTRAP, i, StepState::Done))
-                    .await
-                    .ok();
+                tx.send(ProgressMessage::SetSubStep(
+                    STEP_BOOTSTRAP,
+                    i,
+                    StepState::Done,
+                ))
+                .await
+                .ok();
             }
             return Ok(());
         }
@@ -798,6 +1165,24 @@ async fn verify_ssh_key_accessible(config: &AppConfig) -> Result<()> {
     )))
 }
 
+/// Verify SSHFS is available before creating a VM.
+///
+/// This is a pre-flight check to fail fast with helpful instructions
+/// rather than creating a VM that won't work as expected.
+async fn verify_sshfs_available() -> Result<()> {
+    let sshfs_installed = SshfsDriver::check_sshfs_installed().await;
+    let fuse_available = SshfsDriver::check_fuse_available().await;
+
+    if !sshfs_installed || !fuse_available {
+        return Err(SpuffError::Volume(format!(
+            "SSHFS is required for volume mounts but is not available.\n\n{}",
+            get_install_instructions()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Upload local spuff-agent binary and ensure the service is running
 async fn upload_local_agent(ip: &str, config: &AppConfig, agent_path: &str) -> Result<()> {
     // Ensure /opt/spuff exists
@@ -868,4 +1253,154 @@ async fn trigger_devtools_installation(ip: &str, config: &AppConfig) -> Result<(
         // Don't fail even if the response is unexpected
         Ok(())
     }
+}
+
+/// Sync local file or directory to VM using rsync
+async fn sync_to_vm(
+    vm_ip: &str,
+    ssh_user: &str,
+    ssh_key_path: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    let local_metadata = std::fs::metadata(local_path).map_err(|e| {
+        SpuffError::Volume(format!(
+            "Failed to get metadata for '{}': {}",
+            local_path, e
+        ))
+    })?;
+
+    let is_file = local_metadata.is_file();
+
+    // Build rsync command with SSH options
+    let ssh_cmd = format!(
+        "ssh -i \"{}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+        ssh_key_path
+    );
+
+    // For directories: add trailing / to sync contents, not the directory itself
+    // For files: use the path as-is
+    let local_source = if is_file || local_path.ends_with('/') {
+        local_path.to_string()
+    } else {
+        format!("{}/", local_path)
+    };
+
+    let remote_dest = format!("{}@{}:{}", ssh_user, vm_ip, remote_path);
+
+    // First ensure remote directory/parent exists
+    let path_to_create = if is_file {
+        // For files, create the parent directory
+        std::path::Path::new(remote_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        remote_path.to_string()
+    };
+
+    if !path_to_create.is_empty() && path_to_create != "/" {
+        // Use internal SSH implementation
+        let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+        match SshClient::connect(vm_ip, 22, &config).await {
+            Ok(client) => {
+                let command = format!("mkdir -p '{}'", path_to_create.replace('\'', "'\\''"));
+                match client.exec(&command).await {
+                    Ok(output) => {
+                        if !output.success {
+                            tracing::warn!("Failed to create remote directory: {}", output.stderr);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create remote directory: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect via SSH: {}", e);
+            }
+        }
+    }
+
+    // Build rsync args - only use --delete for directories
+    let mut rsync_args = vec!["-avz"];
+    if !is_file {
+        rsync_args.push("--delete");
+    }
+    rsync_args.extend(["-e", &ssh_cmd, &local_source, &remote_dest]);
+
+    // Run rsync
+    let output = Command::new("rsync")
+        .args(&rsync_args)
+        .output()
+        .await
+        .map_err(|e| SpuffError::Volume(format!("Failed to execute rsync: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(SpuffError::Volume(format!(
+            "Failed to sync to VM: {}",
+            stderr
+        )));
+    }
+
+    tracing::debug!(
+        "Synced {} ({}) to {}:{}",
+        local_path,
+        if is_file { "file" } else { "directory" },
+        vm_ip,
+        remote_path
+    );
+    Ok(())
+}
+
+/// Check if a source path is a file (not directory)
+/// If source exists locally, use its metadata.
+/// If source doesn't exist, check remotely via SSH.
+async fn is_file_volume_async(
+    source_path: &str,
+    target: &str,
+    vm_ip: &str,
+    ssh_user: &str,
+    ssh_key_path: &str,
+) -> bool {
+    // If source exists locally, use its metadata
+    if !source_path.is_empty() && std::path::Path::new(source_path).exists() {
+        return std::fs::metadata(source_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+    }
+
+    // If target ends with /, it's definitely a directory
+    if target.ends_with('/') {
+        return false;
+    }
+
+    // Check remotely via SSH if the target exists and is a directory
+    let config = SshConfig::new(ssh_user, PathBuf::from(ssh_key_path));
+    if let Ok(client) = SshClient::connect(vm_ip, 22, &config).await {
+        // Use test -d to check if path is a directory, test -f to check if it's a file
+        let escaped_target = target.replace('\'', "'\\''");
+        let command = format!(
+            "if [ -d '{}' ]; then echo 'dir'; elif [ -f '{}' ]; then echo 'file'; else echo 'unknown'; fi",
+            escaped_target, escaped_target
+        );
+        if let Ok(output) = client.exec(&command).await {
+            let result = output.stdout.trim();
+            match result {
+                "dir" => return false,
+                "file" => return true,
+                _ => {
+                    // Path doesn't exist yet - default to directory (safer for SSHFS)
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Fallback: if SSH check fails, default to directory (safer for SSHFS)
+    // This allows the mount to proceed and the user can see if it fails
+    false
 }

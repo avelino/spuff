@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SpuffError};
+use crate::volume::VolumeConfig;
 
 /// Main project configuration loaded from spuff.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,124 @@ pub struct ProjectConfig {
     /// Lifecycle hooks
     #[serde(default)]
     pub hooks: HooksConfig,
+
+    /// AI coding tools to install (claude-code, codex, opencode)
+    /// Can be a list of tools, "all", or "none"
+    #[serde(default)]
+    pub ai_tools: AiToolsConfig,
+
+    /// Volume mounts (local directories mounted on the VM)
+    #[serde(default)]
+    pub volumes: Vec<VolumeConfig>,
+
+    /// Base directory where spuff.yaml is located (not serialized)
+    /// Used to resolve relative paths in the config
+    #[serde(skip)]
+    pub base_dir: Option<PathBuf>,
+}
+
+/// AI tools configuration
+/// Supports: list of specific tools, "all", or "none"
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AiToolsConfig {
+    /// Install all AI tools (default)
+    #[default]
+    All,
+    /// Don't install any AI tools
+    None,
+    /// Install specific tools
+    List(Vec<String>),
+}
+
+impl Serialize for AiToolsConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            AiToolsConfig::All => serializer.serialize_str("all"),
+            AiToolsConfig::None => serializer.serialize_str("none"),
+            AiToolsConfig::List(tools) => tools.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AiToolsConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct AiToolsConfigVisitor;
+
+        impl<'de> Visitor<'de> for AiToolsConfigVisitor {
+            type Value = AiToolsConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("'all', 'none', or a list of AI tool names")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<AiToolsConfig, E>
+            where
+                E: de::Error,
+            {
+                match value.to_lowercase().as_str() {
+                    "all" => Ok(AiToolsConfig::All),
+                    "none" => Ok(AiToolsConfig::None),
+                    _ => Err(de::Error::custom(format!(
+                        "invalid ai_tools value: '{}', expected 'all', 'none', or a list",
+                        value
+                    ))),
+                }
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<AiToolsConfig, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut tools = Vec::new();
+                while let Some(tool) = seq.next_element::<String>()? {
+                    tools.push(tool);
+                }
+                Ok(AiToolsConfig::List(tools))
+            }
+        }
+
+        deserializer.deserialize_any(AiToolsConfigVisitor)
+    }
+}
+
+impl AiToolsConfig {
+    /// Check if a specific tool should be installed
+    pub fn should_install(&self, tool: &str) -> bool {
+        match self {
+            AiToolsConfig::All => true,
+            AiToolsConfig::None => false,
+            AiToolsConfig::List(tools) => tools.iter().any(|t| t == tool),
+        }
+    }
+
+    /// Get list of tools to install
+    pub fn tools_to_install(&self) -> Vec<&str> {
+        match self {
+            AiToolsConfig::All => vec!["claude-code", "codex", "opencode"],
+            AiToolsConfig::None => vec![],
+            AiToolsConfig::List(tools) => tools.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+
+    /// Parse from CLI argument string (e.g., "claude-code,codex" or "all" or "none")
+    pub fn from_cli_arg(arg: &str) -> Self {
+        match arg.to_lowercase().as_str() {
+            "all" => AiToolsConfig::All,
+            "none" => AiToolsConfig::None,
+            _ => {
+                let tools: Vec<String> = arg.split(',').map(|s| s.trim().to_string()).collect();
+                AiToolsConfig::List(tools)
+            }
+        }
+    }
 }
 
 fn default_version() -> String {
@@ -159,6 +278,9 @@ impl Default for ProjectConfig {
             setup: Vec::new(),
             ports: Vec::new(),
             hooks: HooksConfig::default(),
+            ai_tools: AiToolsConfig::default(),
+            volumes: Vec::new(),
+            base_dir: None,
         }
     }
 }
@@ -190,13 +312,14 @@ impl ProjectConfig {
 
     /// Load project configuration from a path
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            SpuffError::Config(format!("Failed to read {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SpuffError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        let mut config: ProjectConfig = serde_yaml::from_str(&content).map_err(|e| {
-            SpuffError::Config(format!("Invalid spuff.yaml: {}", e))
-        })?;
+        let mut config: ProjectConfig = serde_yaml::from_str(&content)
+            .map_err(|e| SpuffError::Config(format!("Invalid spuff.yaml: {}", e)))?;
+
+        // Set base directory for resolving relative paths
+        config.base_dir = path.parent().map(|p| p.to_path_buf());
 
         // Load secrets if they exist
         let secrets_path = path.with_file_name("spuff.secrets.yaml");
@@ -220,9 +343,8 @@ impl ProjectConfig {
 
     /// Merge secrets from spuff.secrets.yaml
     fn merge_secrets(&mut self, path: &Path) -> Result<()> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            SpuffError::Config(format!("Failed to read {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SpuffError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
         #[derive(Deserialize)]
         struct Secrets {
@@ -230,9 +352,8 @@ impl ProjectConfig {
             env: HashMap<String, String>,
         }
 
-        let secrets: Secrets = serde_yaml::from_str(&content).map_err(|e| {
-            SpuffError::Config(format!("Invalid spuff.secrets.yaml: {}", e))
-        })?;
+        let secrets: Secrets = serde_yaml::from_str(&content)
+            .map_err(|e| SpuffError::Config(format!("Invalid spuff.secrets.yaml: {}", e)))?;
 
         // Secrets override env vars from main config
         for (key, value) in secrets.env {
@@ -258,7 +379,8 @@ fn resolve_env_value(value: &str) -> String {
     let mut result = value.to_string();
 
     // Match ${VAR:-default} pattern
-    let re_with_default = regex_lite::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}").unwrap();
+    let re_with_default =
+        regex_lite::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}").unwrap();
     result = re_with_default
         .replace_all(&result, |caps: &regex_lite::Captures| {
             let var_name = &caps[1];
@@ -289,20 +411,15 @@ fn resolve_env_value(value: &str) -> String {
 }
 
 /// Status of a project setup item
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupStatus {
+    #[default]
     Pending,
     InProgress,
     Done,
     Failed(String),
     Skipped,
-}
-
-impl Default for SetupStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 /// Status of the entire project setup
@@ -544,5 +661,102 @@ hooks:
         assert!(config.bundles.is_empty());
         assert!(config.packages.is_empty());
         assert!(config.services.enabled);
+        assert_eq!(config.ai_tools, AiToolsConfig::All);
+    }
+
+    #[test]
+    fn test_ai_tools_config_all() {
+        let yaml = r#"
+ai_tools: all
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.ai_tools.should_install("claude-code"));
+        assert!(config.ai_tools.should_install("codex"));
+        assert!(config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_config_none() {
+        let yaml = r#"
+ai_tools: none
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.ai_tools.should_install("claude-code"));
+        assert!(!config.ai_tools.should_install("codex"));
+        assert!(!config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_config_list() {
+        let yaml = r#"
+ai_tools:
+  - claude-code
+  - opencode
+"#;
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.ai_tools.should_install("claude-code"));
+        assert!(!config.ai_tools.should_install("codex"));
+        assert!(config.ai_tools.should_install("opencode"));
+    }
+
+    #[test]
+    fn test_ai_tools_from_cli_arg() {
+        assert_eq!(AiToolsConfig::from_cli_arg("all"), AiToolsConfig::All);
+        assert_eq!(AiToolsConfig::from_cli_arg("ALL"), AiToolsConfig::All);
+        assert_eq!(AiToolsConfig::from_cli_arg("none"), AiToolsConfig::None);
+        assert_eq!(AiToolsConfig::from_cli_arg("NONE"), AiToolsConfig::None);
+
+        let list = AiToolsConfig::from_cli_arg("claude-code,codex");
+        match list {
+            AiToolsConfig::List(tools) => {
+                assert_eq!(tools, vec!["claude-code", "codex"]);
+            }
+            _ => panic!("Expected List variant"),
+        }
+    }
+
+    #[test]
+    fn test_ai_tools_tools_to_install() {
+        assert_eq!(
+            AiToolsConfig::All.tools_to_install(),
+            vec!["claude-code", "codex", "opencode"]
+        );
+        assert!(AiToolsConfig::None.tools_to_install().is_empty());
+
+        let list = AiToolsConfig::List(vec!["claude-code".to_string()]);
+        assert_eq!(list.tools_to_install(), vec!["claude-code"]);
+    }
+
+    #[test]
+    fn test_parse_volumes_config() {
+        let yaml = r#"
+volumes:
+  - source: ./src
+    target: /home/dev/project
+  - source: ~/.config/nvim
+    target: /home/dev/.config/nvim
+    read_only: true
+    options:
+      compression: true
+"#;
+
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.volumes.len(), 2);
+
+        let vol1 = &config.volumes[0];
+        assert_eq!(vol1.source, "./src");
+        assert_eq!(vol1.target, "/home/dev/project");
+        assert!(!vol1.read_only);
+
+        let vol2 = &config.volumes[1];
+        assert_eq!(vol2.source, "~/.config/nvim");
+        assert!(vol2.read_only);
+        assert!(vol2.options.compression);
+    }
+
+    #[test]
+    fn test_default_config_has_empty_volumes() {
+        let config = ProjectConfig::default();
+        assert!(config.volumes.is_empty());
     }
 }

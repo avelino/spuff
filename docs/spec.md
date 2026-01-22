@@ -42,36 +42,33 @@ A **Spuff configuration** consists of:
 
 The following diagram shows how the configuration elements interact:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        spuff.yaml                               │
-├─────────────────────────────────────────────────────────────────┤
-│  version: "1"                                                   │
-│  name: my-project                                               │
-│                                                                 │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │    resources    │  │     bundles     │  │    packages     │  │
-│  │  (VM sizing)    │  │  (toolchains)   │  │  (apt install)  │  │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘  │
-│           │                    │                    │           │
-│           ▼                    ▼                    ▼           │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    Cloud-Init Bootstrap                     ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                │                                │
-│                                ▼                                │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                      spuff-agent                            ││
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           ││
-│  │  │services │ │  repos  │ │  setup  │ │  hooks  │           ││
-│  │  │(docker) │ │  (git)  │ │(scripts)│ │(post_up)│           ││
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘           ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  ports: [3000, 8080]  →  SSH Tunnel (spuff ssh)             ││
-│  └─────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph spuffyaml["spuff.yaml"]
+        version["version: '1'<br/>name: my-project"]
+
+        subgraph config["Configuration"]
+            resources["resources<br/>(VM sizing)"]
+            bundles["bundles<br/>(toolchains)"]
+            packages["packages<br/>(apt install)"]
+        end
+
+        cloudinit["Cloud-Init Bootstrap"]
+
+        subgraph agent["spuff-agent"]
+            services["services<br/>(docker)"]
+            repos["repos<br/>(git)"]
+            setup["setup<br/>(scripts)"]
+            hooks["hooks<br/>(post_up)"]
+        end
+
+        ports["ports: [3000, 8080] → SSH Tunnel (spuff ssh)"]
+    end
+
+    resources --> cloudinit
+    bundles --> cloudinit
+    packages --> cloudinit
+    cloudinit --> agent
 ```
 
 ### File Discovery
@@ -157,7 +154,7 @@ Configuration values follow this precedence order (highest to lowest):
 
 1. CLI flags (`--size`, `--region`)
 2. Project configuration (`spuff.yaml`)
-3. Global configuration (`~/.config/spuff/config.yaml`)
+3. Global configuration (`~/.spuff/config.yaml`)
 4. Provider defaults
 
 ### size

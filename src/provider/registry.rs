@@ -108,12 +108,11 @@ impl ProviderRegistry {
         token: &str,
         timeouts: ProviderTimeouts,
     ) -> ProviderResult<Box<dyn Provider>> {
-        let provider_type = ProviderType::from_str(name).ok_or_else(|| {
-            ProviderError::UnknownProvider {
+        let provider_type =
+            ProviderType::from_str(name).ok_or_else(|| ProviderError::UnknownProvider {
                 name: name.to_string(),
                 supported: ProviderType::supported_names(),
-            }
-        })?;
+            })?;
 
         self.create(provider_type, token, timeouts)
     }

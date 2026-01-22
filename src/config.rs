@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SpuffError};
+use crate::project_config::AiToolsConfig;
 use crate::provider::ProviderType;
+use crate::volume::VolumeConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -27,6 +29,15 @@ pub struct AppConfig {
     /// When set, the agent requires this token in the X-Spuff-Token header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_token: Option<String>,
+    /// AI coding tools preference (claude-code, codex, opencode).
+    /// Can be "all", "none", or a list of specific tools.
+    /// This is the user's default preference, can be overridden by project config or CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_tools: Option<AiToolsConfig>,
+    /// Global volume mounts that apply to all instances.
+    /// These are merged with project-specific volumes from spuff.yaml.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeConfig>,
 }
 
 fn default_ssh_user() -> String {
@@ -48,6 +59,8 @@ impl Default for AppConfig {
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None, // None means use default (all)
+            volumes: Vec::new(),
         }
     }
 }
@@ -56,7 +69,7 @@ impl AppConfig {
     pub fn config_dir() -> Result<PathBuf> {
         let home = std::env::var("HOME")
             .map_err(|_| SpuffError::Config("HOME environment variable not set".to_string()))?;
-        Ok(PathBuf::from(home).join(".config").join("spuff"))
+        Ok(PathBuf::from(home).join(".spuff"))
     }
 
     pub fn config_path() -> Result<PathBuf> {
@@ -187,11 +200,20 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let s = s.trim().to_lowercase();
 
     if let Some(hours) = s.strip_suffix('h') {
-        hours.parse::<u64>().ok().map(|h| std::time::Duration::from_secs(h * 3600))
+        hours
+            .parse::<u64>()
+            .ok()
+            .map(|h| std::time::Duration::from_secs(h * 3600))
     } else if let Some(minutes) = s.strip_suffix('m') {
-        minutes.parse::<u64>().ok().map(|m| std::time::Duration::from_secs(m * 60))
+        minutes
+            .parse::<u64>()
+            .ok()
+            .map(|m| std::time::Duration::from_secs(m * 60))
     } else if let Some(seconds) = s.strip_suffix('s') {
-        seconds.parse::<u64>().ok().map(std::time::Duration::from_secs)
+        seconds
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
     } else {
         s.parse::<u64>().ok().map(std::time::Duration::from_secs)
     }
@@ -204,27 +226,54 @@ mod tests {
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("2h"), Some(std::time::Duration::from_secs(7200)));
-        assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
-        assert_eq!(parse_duration("24H"), Some(std::time::Duration::from_secs(86400)));
+        assert_eq!(
+            parse_duration("2h"),
+            Some(std::time::Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_duration("1h"),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_duration("24H"),
+            Some(std::time::Duration::from_secs(86400))
+        );
     }
 
     #[test]
     fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("30m"), Some(std::time::Duration::from_secs(1800)));
-        assert_eq!(parse_duration("1m"), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(parse_duration("90M"), Some(std::time::Duration::from_secs(5400)));
+        assert_eq!(
+            parse_duration("30m"),
+            Some(std::time::Duration::from_secs(1800))
+        );
+        assert_eq!(
+            parse_duration("1m"),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_duration("90M"),
+            Some(std::time::Duration::from_secs(5400))
+        );
     }
 
     #[test]
     fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("60s"), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(parse_duration("3600S"), Some(std::time::Duration::from_secs(3600)));
+        assert_eq!(
+            parse_duration("60s"),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_duration("3600S"),
+            Some(std::time::Duration::from_secs(3600))
+        );
     }
 
     #[test]
     fn test_parse_duration_raw_seconds() {
-        assert_eq!(parse_duration("7200"), Some(std::time::Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration("7200"),
+            Some(std::time::Duration::from_secs(7200))
+        );
     }
 
     #[test]
@@ -236,7 +285,10 @@ mod tests {
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration("  2h  "), Some(std::time::Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration("  2h  "),
+            Some(std::time::Duration::from_secs(7200))
+        );
     }
 
     #[test]
@@ -250,6 +302,7 @@ mod tests {
         assert_eq!(config.ssh_user, "dev");
         assert!(!config.tailscale_enabled);
         assert!(config.agent_token.is_none());
+        assert!(config.ai_tools.is_none()); // None means use default (all)
     }
 
     #[test]
@@ -267,6 +320,8 @@ mod tests {
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None,
+            volumes: Vec::new(),
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -277,6 +332,10 @@ mod tests {
         assert!(!yaml.contains("api_token"));
         // agent_token should not appear when None
         assert!(!yaml.contains("agent_token"));
+        // ai_tools should not appear when None
+        assert!(!yaml.contains("ai_tools"));
+        // volumes should not appear when empty
+        assert!(!yaml.contains("volumes"));
     }
 
     #[test]
@@ -334,7 +393,7 @@ tailscale_authkey: tskey-xxx
     #[ignore]
     fn test_config_save_and_load() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path().join(".config").join("spuff");
+        let config_dir = temp_dir.path().join(".spuff");
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_path = config_dir.join("config.yaml");
 
@@ -357,6 +416,8 @@ tailscale_authkey: tskey-xxx
             tailscale_enabled: false,
             tailscale_authkey: None,
             agent_token: None,
+            ai_tools: None,
+            volumes: Vec::new(),
         };
 
         config.save().unwrap();
@@ -376,7 +437,7 @@ tailscale_authkey: tskey-xxx
     #[ignore]
     fn test_config_load_with_env_token() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path().join(".config").join("spuff");
+        let config_dir = temp_dir.path().join(".spuff");
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_path = config_dir.join("config.yaml");
 
@@ -449,6 +510,9 @@ ssh_user: root
         };
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid idle_timeout"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid idle_timeout"));
     }
 }

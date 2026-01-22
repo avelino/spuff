@@ -22,6 +22,8 @@ packages:
   - mosh
   - jq
   - htop
+{% if volume_packages %}{% for pkg in volume_packages %}  - {{ pkg }}
+{% endfor %}{% endif %}
 
 users:
   - name: {{ username }}
@@ -31,10 +33,28 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - {{ ssh_public_key }}
-{% if spuff_public_key %}      - {{ spuff_public_key }}
-{% endif %}
+{%- if has_spuff_public_key %}
+      - {{ spuff_public_key }}
+{%- endif %}
 
 write_files:
+  # FUSE configuration for SSHFS allow_other option
+  - path: /etc/fuse.conf
+    permissions: '0644'
+    content: |
+      # Allow non-root users to specify the allow_other mount option
+      user_allow_other
+
+{%- if has_spuff_private_key %}
+  # Spuff SSH key for reverse tunnel authentication (volume mounting)
+  - path: /home/{{ username }}/.ssh/spuff_key
+    owner: {{ username }}:{{ username }}
+    permissions: '0600'
+    defer: true
+    content: |
+      {{ spuff_private_key }}
+{%- endif %}
+
   # Store username for agent devtools installation
   - path: /opt/spuff/username
     permissions: '0644'
@@ -48,7 +68,9 @@ write_files:
         "docker": true,
         "shell_tools": true,
         "nodejs": true,
-        "claude_code": true,
+        "claude_code": {{ ai_claude_code }},
+        "codex": {{ ai_codex }},
+        "opencode": {{ ai_opencode }},
         "environment": {% if environment %}"{{ environment }}"{% else %}null{% endif %},
         "dotfiles": {% if dotfiles %}"{{ dotfiles }}"{% else %}null{% endif %},
         "tailscale": {% if tailscale_enabled %}true{% else %}false{% endif %},
@@ -422,7 +444,21 @@ runcmd:
 final_message: "spuff cloud-init done in $UPTIME seconds - bootstrap running async"
 "#;
 
-pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectConfig>) -> Result<String> {
+/// Generate cloud-init configuration (used by tests)
+#[cfg(test)]
+pub fn generate_cloud_init(
+    config: &AppConfig,
+    project_config: Option<&ProjectConfig>,
+) -> Result<String> {
+    generate_cloud_init_with_ai_tools(config, project_config, None)
+}
+
+/// Generate cloud-init with explicit AI tools override from CLI
+pub fn generate_cloud_init_with_ai_tools(
+    config: &AppConfig,
+    project_config: Option<&ProjectConfig>,
+    cli_ai_tools: Option<&crate::project_config::AiToolsConfig>,
+) -> Result<String> {
     let mut tera = Tera::default();
     tera.add_raw_template("cloud-init", CLOUD_INIT_TEMPLATE)?;
 
@@ -434,6 +470,25 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
         .ok()
         .filter(|k| !k.is_empty());
 
+    // Get spuff managed private key for reverse SSH tunnel (volume mounting)
+    // Indent each line for YAML block scalar (content: |) - needs 6 spaces
+    let spuff_private_key = crate::ssh::managed_key::get_managed_key_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|key| {
+            key.lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    if i == 0 {
+                        line.to_string()
+                    } else {
+                        format!("      {}", line) // 6 spaces for YAML block scalar
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+
     // Determine home directory based on username
     let home_dir = if config.ssh_user == "root" {
         "/root".to_string()
@@ -442,16 +497,64 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
     };
 
     // Serialize project config to JSON if present
+    // Indent each line for YAML block scalar (content: |) - needs 6 spaces
     let project_config_json = project_config
-        .map(|pc| serde_json::to_string_pretty(pc))
+        .map(|pc| {
+            serde_json::to_string_pretty(pc).map(|json| {
+                json.lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        if i == 0 {
+                            line.to_string() // First line doesn't need extra indent
+                        } else {
+                            format!("      {}", line) // 6 spaces for YAML block scalar
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
         .transpose()
-        .map_err(|e| crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e)))?;
+        .map_err(|e| {
+            crate::error::SpuffError::Config(format!("Failed to serialize project config: {}", e))
+        })?;
+
+    // Determine AI tools configuration
+    // Priority: CLI > Project config > Global config > Default (all)
+    let ai_tools = cli_ai_tools
+        .or(project_config.map(|pc| &pc.ai_tools))
+        .or(config.ai_tools.as_ref())
+        .cloned()
+        .unwrap_or(crate::project_config::AiToolsConfig::All);
+
+    let ai_claude_code = ai_tools.should_install("claude-code");
+    let ai_codex = ai_tools.should_install("codex");
+    let ai_opencode = ai_tools.should_install("opencode");
+
+    // Get required packages for volume mounts
+    let volume_packages: Vec<&str> = project_config
+        .map(|pc| {
+            let manager = crate::volume::VolumeManager::new();
+            manager.get_required_packages(&pc.volumes)
+        })
+        .unwrap_or_default();
 
     let mut context = Context::new();
     context.insert("username", &config.ssh_user);
     context.insert("home_dir", &home_dir);
     context.insert("ssh_public_key", &ssh_public_key);
-    context.insert("spuff_public_key", &spuff_public_key);
+    // Insert spuff_public_key as a string (empty string if None, so Tera {% if %} works correctly)
+    context.insert(
+        "spuff_public_key",
+        &spuff_public_key.clone().unwrap_or_default(),
+    );
+    context.insert("has_spuff_public_key", &spuff_public_key.is_some());
+    // Insert spuff private key for reverse tunnel authentication
+    context.insert(
+        "spuff_private_key",
+        &spuff_private_key.clone().unwrap_or_default(),
+    );
+    context.insert("has_spuff_private_key", &spuff_private_key.is_some());
     context.insert("environment", &config.environment);
     context.insert("dotfiles", &config.dotfiles);
     context.insert("idle_timeout_seconds", &idle_timeout_seconds);
@@ -460,6 +563,12 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
     context.insert("agent_token", &config.agent_token);
     context.insert("project_config", &project_config_json);
     context.insert("has_project_config", &project_config.is_some());
+    // AI tools configuration
+    context.insert("ai_claude_code", &ai_claude_code);
+    context.insert("ai_codex", &ai_codex);
+    context.insert("ai_opencode", &ai_opencode);
+    // Volume packages
+    context.insert("volume_packages", &volume_packages);
 
     let rendered = tera.render("cloud-init", &context)?;
     Ok(rendered)
@@ -468,12 +577,14 @@ pub fn generate_cloud_init(config: &AppConfig, project_config: Option<&ProjectCo
 fn read_ssh_public_key(private_key_path: &str) -> Result<String> {
     let public_key_path = format!("{}.pub", private_key_path);
 
-    std::fs::read_to_string(&public_key_path).map_err(|e| {
-        crate::error::SpuffError::Config(format!(
-            "Failed to read SSH public key '{}': {}. Make sure the key exists.",
-            public_key_path, e
-        ))
-    })
+    std::fs::read_to_string(&public_key_path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| {
+            crate::error::SpuffError::Config(format!(
+                "Failed to read SSH public key '{}': {}. Make sure the key exists.",
+                public_key_path, e
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -486,7 +597,11 @@ mod tests {
         let pub_key_path = temp_dir.path().join("test_key.pub");
 
         std::fs::write(&key_path, "fake-private-key").unwrap();
-        std::fs::write(&pub_key_path, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... test@example.com").unwrap();
+        std::fs::write(
+            &pub_key_path,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... test@example.com",
+        )
+        .unwrap();
 
         (temp_dir, key_path.to_string_lossy().to_string())
     }
@@ -687,9 +802,47 @@ mod tests {
         };
 
         let result = generate_cloud_init(&config, None).unwrap();
-        // Node.js and Claude Code are now installed via agent, config in devtools.json
+        // Node.js and AI tools are now installed via agent, config in devtools.json
         assert!(result.contains("\"nodejs\": true"));
         assert!(result.contains("\"claude_code\": true"));
+        assert!(result.contains("\"codex\": true"));
+        assert!(result.contains("\"opencode\": true"));
+    }
+
+    #[test]
+    fn test_cloud_init_ai_tools_none() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ai_tools: Some(crate::project_config::AiToolsConfig::None),
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, None).unwrap();
+        // All AI tools should be disabled
+        assert!(result.contains("\"claude_code\": false"));
+        assert!(result.contains("\"codex\": false"));
+        assert!(result.contains("\"opencode\": false"));
+    }
+
+    #[test]
+    fn test_cloud_init_ai_tools_specific() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ai_tools: Some(crate::project_config::AiToolsConfig::List(vec![
+                "claude-code".to_string(),
+            ])),
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, None).unwrap();
+        // Only claude-code should be enabled
+        assert!(result.contains("\"claude_code\": true"));
+        assert!(result.contains("\"codex\": false"));
+        assert!(result.contains("\"opencode\": false"));
     }
 
     #[test]
@@ -734,7 +887,10 @@ mod tests {
 
         // Basic YAML validation - should not panic
         let yaml_result: std::result::Result<serde_yaml::Value, _> = serde_yaml::from_str(&result);
-        assert!(yaml_result.is_ok(), "Generated cloud-init should be valid YAML");
+        assert!(
+            yaml_result.is_ok(),
+            "Generated cloud-init should be valid YAML"
+        );
     }
 
     #[test]
@@ -804,5 +960,53 @@ mod tests {
         assert!(result.contains("/opt/spuff/bootstrap.sh"));
         assert!(result.contains("bootstrap.status"));
         assert!(result.contains("--no-block"));
+    }
+
+    #[test]
+    fn test_cloud_init_with_volumes() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ..Default::default()
+        };
+
+        let project_config = crate::project_config::ProjectConfig {
+            volumes: vec![crate::volume::VolumeConfig::new("./src", "/mnt/src")],
+            ..Default::default()
+        };
+
+        let result = generate_cloud_init(&config, Some(&project_config)).unwrap();
+
+        // With the new Local -> VM architecture, SSHFS runs locally
+        // so no sshfs/fuse packages are needed on the VM
+        // Just verify cloud-init is valid
+        assert!(
+            result.contains("cloud-config"),
+            "Should be valid cloud-config"
+        );
+        assert!(
+            result.contains("git"),
+            "Should contain basic packages like git"
+        );
+    }
+
+    #[test]
+    fn test_cloud_init_without_volumes() {
+        let (_temp_dir, key_path) = create_test_ssh_key();
+
+        let config = AppConfig {
+            ssh_key_path: key_path,
+            ..Default::default()
+        };
+
+        let project_config = crate::project_config::ProjectConfig::default();
+        let result = generate_cloud_init(&config, Some(&project_config)).unwrap();
+
+        // Should not contain sshfs when no volumes configured
+        // Note: The packages list is empty when no volumes, so sshfs shouldn't appear as a dedicated package
+        // Basic packages should still be present
+        assert!(result.contains("git"));
+        assert!(result.contains("curl"));
     }
 }

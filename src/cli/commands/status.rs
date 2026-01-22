@@ -85,7 +85,11 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
                 let provider = create_provider(config)?;
                 match provider.get_instance(&instance.id).await {
                     Ok(Some(remote)) => {
-                        println!("  {}        {}", style("Status").dim(), format_status(&remote.status.to_string()));
+                        println!(
+                            "  {}        {}",
+                            style("Status").dim(),
+                            format_status(&remote.status.to_string())
+                        );
                     }
                     Ok(None) => {
                         println!(
@@ -95,7 +99,12 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
                         );
                     }
                     Err(e) => {
-                        println!("  {}        {} ({})", style("Status").dim(), style("unknown").yellow(), e);
+                        println!(
+                            "  {}        {} ({})",
+                            style("Status").dim(),
+                            style("unknown").yellow(),
+                            e
+                        );
                     }
                 }
 
@@ -142,11 +151,19 @@ pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
             }
 
             println!();
-            println!("  {} spuff ssh    {} spuff down", style("→").cyan(), style("×").red());
+            println!(
+                "  {} spuff ssh    {} spuff down",
+                style("→").cyan(),
+                style("×").red()
+            );
         }
         None => {
             super::ssh::print_banner();
-            println!("  {} {}", style("○").dim(), style("No active environment").dim());
+            println!(
+                "  {} {}",
+                style("○").dim(),
+                style("No active environment").dim()
+            );
             println!();
             println!("  Run {} to create one.", style("spuff up").cyan());
         }
@@ -192,9 +209,7 @@ fn get_step_state(step_key: &str, current_status: &str) -> StepState {
         .iter()
         .position(|(key, _)| *key == current_status || current_status.starts_with(key));
 
-    let step_idx = BOOTSTRAP_STEPS
-        .iter()
-        .position(|(key, _)| *key == step_key);
+    let step_idx = BOOTSTRAP_STEPS.iter().position(|(key, _)| *key == step_key);
 
     match (current_idx, step_idx) {
         (Some(curr), Some(step)) => {
@@ -228,18 +243,12 @@ fn print_bootstrap_checklist(current_status: &str) {
         let state = get_step_state(step_key, current_status);
 
         let (icon, styled_label) = match state {
-            StepState::Completed => (
-                style("[x]").green(),
-                style(*step_label).green(),
-            ),
+            StepState::Completed => (style("[x]").green(), style(*step_label).green()),
             StepState::InProgress => (
                 style("[>]").yellow().bold(),
                 style(*step_label).yellow().bold(),
             ),
-            StepState::Pending => (
-                style("[ ]").dim(),
-                style(*step_label).dim(),
-            ),
+            StepState::Pending => (style("[ ]").dim(), style(*step_label).dim()),
         };
 
         println!("    {} {}", icon, styled_label);
@@ -275,7 +284,10 @@ async fn get_devtools_status(ip: &str, config: &AppConfig) -> Result<DevToolsSta
 fn print_devtools_status(devtools: &DevToolsState) {
     if !devtools.started {
         println!("  {}", style("Devtools: not started").dim());
-        println!("  {}", style("Run 'spuff agent devtools install' to start").dim());
+        println!(
+            "  {}",
+            style("Run 'spuff agent devtools install' to start").dim()
+        );
         return;
     }
 
@@ -289,10 +301,26 @@ fn print_devtools_status(devtools: &DevToolsState) {
     println!();
 
     // Count stats
-    let done = devtools.tools.iter().filter(|t| t.status == DevToolStatus::Done).count();
-    let installing = devtools.tools.iter().filter(|t| t.status == DevToolStatus::Installing).count();
-    let failed = devtools.tools.iter().filter(|t| matches!(t.status, DevToolStatus::Failed(_))).count();
-    let total = devtools.tools.iter().filter(|t| t.status != DevToolStatus::Skipped).count();
+    let done = devtools
+        .tools
+        .iter()
+        .filter(|t| t.status == DevToolStatus::Done)
+        .count();
+    let installing = devtools
+        .tools
+        .iter()
+        .filter(|t| t.status == DevToolStatus::Installing)
+        .count();
+    let failed = devtools
+        .tools
+        .iter()
+        .filter(|t| matches!(t.status, DevToolStatus::Failed(_)))
+        .count();
+    let total = devtools
+        .tools
+        .iter()
+        .filter(|t| t.status != DevToolStatus::Skipped)
+        .count();
 
     if total > 0 {
         println!(
@@ -300,8 +328,16 @@ fn print_devtools_status(devtools: &DevToolsState) {
             style("→").dim(),
             done,
             total,
-            if installing > 0 { format!(", {} installing", installing) } else { String::new() },
-            if failed > 0 { format!(", {} failed", style(failed).red()) } else { String::new() },
+            if installing > 0 {
+                format!(", {} installing", installing)
+            } else {
+                String::new()
+            },
+            if failed > 0 {
+                format!(", {} failed", style(failed).red())
+            } else {
+                String::new()
+            },
         );
     }
 
@@ -313,13 +349,18 @@ fn print_devtools_status(devtools: &DevToolsState) {
 
         let (icon, name_style) = match &tool.status {
             DevToolStatus::Done => (style("[x]").green(), style(&tool.name).green()),
-            DevToolStatus::Installing => (style("[>]").yellow().bold(), style(&tool.name).yellow().bold()),
+            DevToolStatus::Installing => (
+                style("[>]").yellow().bold(),
+                style(&tool.name).yellow().bold(),
+            ),
             DevToolStatus::Pending => (style("[ ]").dim(), style(&tool.name).dim()),
             DevToolStatus::Failed(_) => (style("[!]").red(), style(&tool.name).red()),
             DevToolStatus::Skipped => continue,
         };
 
-        let version_str = tool.version.as_ref()
+        let version_str = tool
+            .version
+            .as_ref()
             .map(|v| format!(" ({})", style(v).dim()))
             .unwrap_or_default();
 
@@ -352,69 +393,58 @@ fn print_project_setup_status(status: &ProjectSetupState) {
         return;
     }
 
-    println!(
-        "  {} {}",
-        style("╭").dim(),
-        style("─".repeat(56)).dim()
-    );
+    println!("  {} {}", style("╭").dim(), style("─".repeat(56)).dim());
     println!(
         "  {}  {}",
         style("│").dim(),
         style("Project Setup (spuff.yaml)").cyan().bold()
     );
-    println!(
-        "  {} {}",
-        style("├").dim(),
-        style("─".repeat(56)).dim()
-    );
+    println!("  {} {}", style("├").dim(), style("─".repeat(56)).dim());
 
     // Bundles
     if !status.bundles.is_empty() {
-        println!(
-            "  {}  {}",
-            style("│").dim(),
-            style("Bundles").dim().bold()
-        );
+        println!("  {}  {}", style("│").dim(), style("Bundles").dim().bold());
         for bundle in &status.bundles {
             let (icon, name_style) = format_setup_status(&bundle.status, &bundle.name);
-            let version_str = bundle.version.as_ref()
+            let version_str = bundle
+                .version
+                .as_ref()
                 .map(|v| format!(" ({})", style(v).dim()))
                 .unwrap_or_default();
-            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, version_str);
+            println!(
+                "  {}    {} {}{}",
+                style("│").dim(),
+                icon,
+                name_style,
+                version_str
+            );
         }
     }
 
     // Packages
     let packages = &status.packages;
-    if !packages.installed.is_empty() || !packages.failed.is_empty() || packages.status != SetupStatus::Pending {
-        println!(
-            "  {}  {}",
-            style("│").dim(),
-            style("Packages").dim().bold()
-        );
+    if !packages.installed.is_empty()
+        || !packages.failed.is_empty()
+        || packages.status != SetupStatus::Pending
+    {
+        println!("  {}  {}", style("│").dim(), style("Packages").dim().bold());
         let installed_count = packages.installed.len();
         let failed_count = packages.failed.len();
         let (icon, status_text) = match &packages.status {
             SetupStatus::Done => (
                 style("[✓]").green(),
-                style(format!("{} installed", installed_count)).green()
+                style(format!("{} installed", installed_count)).green(),
             ),
             SetupStatus::InProgress => (
                 style("[>]").yellow().bold(),
-                style(format!("{} installed, installing...", installed_count)).yellow()
+                style(format!("{} installed, installing...", installed_count)).yellow(),
             ),
-            SetupStatus::Pending => (
-                style("[ ]").dim(),
-                style("pending".to_string()).dim()
-            ),
+            SetupStatus::Pending => (style("[ ]").dim(), style("pending".to_string()).dim()),
             SetupStatus::Failed(_) => (
                 style("[!]").red(),
-                style(format!("{} failed", failed_count)).red()
+                style(format!("{} failed", failed_count)).red(),
             ),
-            SetupStatus::Skipped => (
-                style("[-]").dim(),
-                style("skipped".to_string()).dim()
-            ),
+            SetupStatus::Skipped => (style("[-]").dim(), style("skipped".to_string()).dim()),
         };
         println!("  {}    {} {}", style("│").dim(), icon, status_text);
     }
@@ -434,10 +464,17 @@ fn print_project_setup_status(status: &ProjectSetupState) {
             } else {
                 (style("[ ]").dim(), style(&container.name).dim())
             };
-            let port_str = container.port
+            let port_str = container
+                .port
                 .map(|p| format!(" ({})", style(p).dim()))
                 .unwrap_or_default();
-            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, port_str);
+            println!(
+                "  {}    {} {}{}",
+                style("│").dim(),
+                icon,
+                name_style,
+                port_str
+            );
         }
     }
 
@@ -450,7 +487,8 @@ fn print_project_setup_status(status: &ProjectSetupState) {
         );
         for repo in &status.repositories {
             // Use URL as display name, extract repo name from it
-            let display_name = repo.url
+            let display_name = repo
+                .url
                 .rsplit('/')
                 .next()
                 .unwrap_or(&repo.url)
@@ -458,7 +496,13 @@ fn print_project_setup_status(status: &ProjectSetupState) {
                 .unwrap_or(&repo.url);
             let (icon, name_style) = format_setup_status(&repo.status, display_name);
             let path_str = format!(" → {}", style(&repo.path).dim());
-            println!("  {}    {} {}{}", style("│").dim(), icon, name_style, path_str);
+            println!(
+                "  {}    {} {}{}",
+                style("│").dim(),
+                icon,
+                name_style,
+                path_str
+            );
         }
     }
 
@@ -483,18 +527,26 @@ fn print_project_setup_status(status: &ProjectSetupState) {
                 SetupStatus::Failed(_) => style(cmd_display).red(),
                 SetupStatus::Skipped => style(cmd_display).dim(),
             };
-            println!("  {}    {} #{} {}", style("│").dim(), icon, i + 1, cmd_style);
+            println!(
+                "  {}    {} #{} {}",
+                style("│").dim(),
+                icon,
+                i + 1,
+                cmd_style
+            );
         }
     }
 
-    println!(
-        "  {} {}",
-        style("╰").dim(),
-        style("─".repeat(56)).dim()
-    );
+    println!("  {} {}", style("╰").dim(), style("─".repeat(56)).dim());
 }
 
-fn format_setup_status<'a>(status: &SetupStatus, name: &'a str) -> (console::StyledObject<&'static str>, console::StyledObject<&'a str>) {
+fn format_setup_status<'a>(
+    status: &SetupStatus,
+    name: &'a str,
+) -> (
+    console::StyledObject<&'static str>,
+    console::StyledObject<&'a str>,
+) {
     match status {
         SetupStatus::Done => (style("[✓]").green(), style(name).green()),
         SetupStatus::InProgress => (style("[>]").yellow().bold(), style(name).yellow().bold()),

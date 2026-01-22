@@ -18,38 +18,27 @@ The security model is designed around:
 
 ## Architecture Security
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         User's Machine (Trusted)                             │
-│                                                                              │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────────────┐ │
-│  │ API Token    │   │ SSH Keys     │   │ Local State (SQLite)             │ │
-│  │ (env var)    │   │ (filesystem) │   │ ~/.config/spuff/state.db         │ │
-│  │              │   │ 0600 perms   │   │                                  │ │
-│  └──────────────┘   └──────────────┘   └──────────────────────────────────┘ │
-│         │                  │                                                 │
-│         │                  │ SSH Agent Forwarding                            │
-│         │                  │ (keys never leave machine)                      │
-│         │                  │                                                 │
-└─────────│──────────────────│─────────────────────────────────────────────────┘
-          │                  │
-          │ HTTPS (TLS)      │ SSH (encrypted)
-          │                  │
-┌─────────│──────────────────│─────────────────────────────────────────────────┐
-│         │                  │              Cloud VM (Semi-trusted)            │
-│         │                  │                                                 │
-│         ▼                  ▼                                                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────────────┐ │
-│  │ Provider API │   │ SSH Server   │   │ spuff-agent                      │ │
-│  │ (external)   │   │ Port 22      │   │ Port 7575 (localhost only)       │ │
-│  └──────────────┘   └──────────────┘   │ Token auth required              │ │
-│                                         └──────────────────────────────────┘ │
-│                                                                              │
-│  No private keys stored                                                      │
-│  No API tokens stored                                                        │
-│  Ephemeral by design                                                         │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph trusted["User's Machine (Trusted)"]
+        token["API Token<br/>(env var)"]
+        sshkeys["SSH Keys<br/>(filesystem)<br/>0600 perms"]
+        state[("Local State<br/>~/.spuff/state.db")]
+    end
+
+    subgraph semitrust["Cloud VM (Semi-trusted)"]
+        providerapi["Provider API<br/>(external)"]
+        sshserver["SSH Server<br/>Port 22"]
+        agent["spuff-agent<br/>Port 7575 (localhost only)<br/>Token auth required"]
+
+        note["No private keys stored<br/>No API tokens stored<br/>Ephemeral by design"]
+    end
+
+    token -->|"HTTPS (TLS)"| providerapi
+    sshkeys -->|"SSH Agent Forwarding<br/>(keys never leave machine)"| sshserver
+    sshkeys -->|"SSH (encrypted)"| sshserver
+
+    style note fill:#f5f5f5,stroke:#ccc,stroke-dasharray: 5 5
 ```
 
 ## Threat Model
@@ -187,8 +176,8 @@ users:
 
 | Data | Storage | Protection |
 |------|---------|------------|
-| Config | ~/.config/spuff/config.yaml | 0600 permissions |
-| State | ~/.config/spuff/state.db | Standard file perms |
+| Config | ~/.spuff/config.yaml | 0600 permissions |
+| State | ~/.spuff/state.db | Standard file perms |
 | SSH keys | ~/.ssh/ | 0600 permissions |
 
 #### In Transit
