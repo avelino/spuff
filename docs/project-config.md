@@ -83,6 +83,12 @@ ports:
   - 8080  # Backend API
   - 5432  # Postgres
 
+# AI coding tools (default: all)
+ai_tools: all   # all | none | list of tools
+# ai_tools:
+#   - claude-code
+#   - copilot
+
 # Volume mounts (SSHFS-based bidirectional sync)
 volumes:
   - source: ./data          # Local directory to sync
@@ -273,6 +279,43 @@ ports:
 ```
 
 This allows you to work "locally" (browser, IDE) while connected to the remote VM.
+
+---
+
+### `ai_tools`
+
+**Type:** `string` or `list` (optional)
+**Default:** `all`
+
+Controls which AI coding tools are installed on the VM.
+
+```yaml
+# Install all tools (default)
+ai_tools: all
+
+# Disable all AI tools
+ai_tools: none
+
+# Install specific tools only
+ai_tools:
+  - claude-code
+  - copilot
+```
+
+**Available tools:**
+
+| Tool | Package | Description |
+|------|---------|-------------|
+| `claude-code` | `@anthropic-ai/claude-code` | Anthropic's Claude Code CLI |
+| `codex` | `@openai/codex` | OpenAI Codex CLI |
+| `opencode` | `opencode-ai` | Open-source AI coding assistant |
+| `copilot` | `@github/copilot` | GitHub Copilot CLI |
+
+**CLI override:** `spuff up --ai-tools claude-code,copilot`
+
+**Precedence:** CLI `--ai-tools` > spuff.yaml > ~/.spuff/config.yaml > default (all)
+
+See [AI Tools documentation](./ai-tools.md) for authentication and configuration details.
 
 ---
 

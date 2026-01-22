@@ -58,7 +58,7 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
 
-    /// AI coding tools to install (claude-code, codex, opencode)
+    /// AI coding tools to install (claude-code, codex, opencode, copilot)
     /// Can be a list of tools, "all", or "none"
     #[serde(default)]
     pub ai_tools: AiToolsConfig,
@@ -158,7 +158,7 @@ impl AiToolsConfig {
     /// Get list of tools to install
     pub fn tools_to_install(&self) -> Vec<&str> {
         match self {
-            AiToolsConfig::All => vec!["claude-code", "codex", "opencode"],
+            AiToolsConfig::All => vec!["claude-code", "codex", "opencode", "copilot"],
             AiToolsConfig::None => vec![],
             AiToolsConfig::List(tools) => tools.iter().map(|s| s.as_str()).collect(),
         }
@@ -673,6 +673,7 @@ ai_tools: all
         assert!(config.ai_tools.should_install("claude-code"));
         assert!(config.ai_tools.should_install("codex"));
         assert!(config.ai_tools.should_install("opencode"));
+        assert!(config.ai_tools.should_install("copilot"));
     }
 
     #[test]
@@ -684,6 +685,7 @@ ai_tools: none
         assert!(!config.ai_tools.should_install("claude-code"));
         assert!(!config.ai_tools.should_install("codex"));
         assert!(!config.ai_tools.should_install("opencode"));
+        assert!(!config.ai_tools.should_install("copilot"));
     }
 
     #[test]
@@ -719,7 +721,7 @@ ai_tools:
     fn test_ai_tools_tools_to_install() {
         assert_eq!(
             AiToolsConfig::All.tools_to_install(),
-            vec!["claude-code", "codex", "opencode"]
+            vec!["claude-code", "codex", "opencode", "copilot"]
         );
         assert!(AiToolsConfig::None.tools_to_install().is_empty());
 

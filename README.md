@@ -160,6 +160,12 @@ spuff volume mount ./src /home/dev/project  # Mount local dir on remote
 spuff volume unmount /home/dev/project      # Unmount a volume
 spuff volume ls                             # List active mounts
 
+# AI coding tools
+spuff ai list                  # Show available AI tools
+spuff ai status                # Check installation status on remote
+spuff ai install copilot       # Install a specific tool
+spuff ai info claude-code      # Show tool details
+
 # Configuration
 spuff config show           # Display current config
 spuff config set region nyc3
