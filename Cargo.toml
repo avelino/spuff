@@ -69,7 +69,7 @@ sysinfo = "0.33"
 uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+chrondb = "0.0.0-dev.5"
 
 # Base64 for cloud-init
 base64 = "0.22"

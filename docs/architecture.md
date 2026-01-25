@@ -29,9 +29,9 @@ flowchart TB
             commands["Commands<br/>(up/down)"]
             provider["Provider<br/>Adapter"]
             ssh["SSH<br/>Connector"]
-            state["State<br/>(SQLite)"]
+            state["State<br/>(ChronDB)"]
         end
-        statedb[("~/.spuff/<br/>state.db")]
+        statedb[("~/.spuff/<br/>chrondb/")]
         stdout["stdout<br/>(TUI progress)"]
     end
 
@@ -63,7 +63,7 @@ The main binary that users interact with. Built with:
 - **tokio** for async runtime
 - **ratatui** for terminal UI
 - **reqwest** for HTTP client (provider APIs)
-- **rusqlite** for local state
+- **chrondb** for local state (Git-backed document store)
 
 Key modules:
 
@@ -76,7 +76,7 @@ Key modules:
   - `digitalocean.rs` - DigitalOcean implementation
 - `src/connector/ssh.rs` - SSH/SCP operations
 - `src/environment/cloud_init.rs` - Cloud-init template generation
-- `src/state.rs` - SQLite state management (`LocalInstance`, `StateDb`)
+- `src/state.rs` - ChronDB state management (`LocalInstance`, `StateDb`)
 - `src/volume/` - SSHFS-based volume mounting:
   - `config.rs` - Volume configuration and path resolution
   - `drivers/sshfs.rs` - SSHFS mount/unmount operations
@@ -654,21 +654,26 @@ This file is read by the agent's `/status` endpoint.
 
 Located in `src/state.rs`.
 
-**Database:** SQLite at `~/.spuff/state.db`
+**Database:** ChronDB at `~/.spuff/chrondb/` (Git-backed document store)
 
-### Schema
+### Storage Structure
 
-```sql
-CREATE TABLE IF NOT EXISTS instances (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    ip TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    region TEXT NOT NULL,
-    size TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    active INTEGER DEFAULT 1
-);
+Documents are stored as JSON with key-based addressing:
+
+- `instance:{id}` — Instance documents (one per provisioned VM)
+- `meta:active` — Pointer to the currently active instance (`{"instance_id": "..."}`)
+
+```json
+// instance:abc123
+{
+    "id": "abc123",
+    "name": "spuff-dev",
+    "ip": "10.0.0.1",
+    "provider": "digitalocean",
+    "region": "nyc1",
+    "size": "s-2vcpu-4gb",
+    "created_at": "2025-01-15T10:30:00Z"
+}
 ```
 
 ### Types
@@ -721,11 +726,11 @@ stateDiagram-v2
     Created --> Destroyed: spuff down<br/>or timeout
 
     note right of Created
-        saved to state.db
+        saved to ChronDB
     end note
 
     note right of Destroyed
-        removed from state.db
+        removed from ChronDB
     end note
 
     Destroyed --> [*]
@@ -959,7 +964,7 @@ From cloud-init:
 | API Token | env var or config.yaml | File permissions (0600) |
 | SSH Private Key | ~/.ssh/id_* | File permissions (0600) |
 | Agent Token | env var | Process environment |
-| State DB | ~/.spuff/state.db | File permissions |
+| State DB | ~/.spuff/chrondb/ | File permissions |
 
 ---
 
@@ -1273,5 +1278,7 @@ curl -H "X-Spuff-Token: $TOKEN" http://127.0.0.1:7575/status
 ### Local State
 
 ```bash
-sqlite3 ~/.spuff/state.db "SELECT * FROM instances;"
+# ChronDB stores data as JSON files in a Git-backed structure
+ls ~/.spuff/chrondb/data/instance/
+cat ~/.spuff/chrondb/data/meta/meta_COLON_active.json
 ```

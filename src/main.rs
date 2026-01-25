@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "spuff=info".into()),
+                .unwrap_or_else(|_| "spuff=info,chrondb=off".into()),
         )
         .with(tracing_subscriber::fmt::layer().without_time())
         .init();

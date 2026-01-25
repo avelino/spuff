@@ -37,7 +37,7 @@ pub enum SpuffError {
     Json(#[from] serde_json::Error),
 
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[from] chrondb::ChronDBError),
 
     #[error("Template error: {0}")]
     Template(#[from] tera::Error),
