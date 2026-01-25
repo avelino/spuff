@@ -103,10 +103,20 @@ impl StateDb {
         let data_path = base.join("data");
         let index_path = base.join("index");
 
-        let db = ChronDB::open(
-            data_path.to_str().unwrap_or_default(),
-            index_path.to_str().unwrap_or_default(),
-        )?;
+        let data_path_str = data_path.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "state database data path is not valid UTF-8",
+            )
+        })?;
+        let index_path_str = index_path.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "state database index path is not valid UTF-8",
+            )
+        })?;
+
+        let db = ChronDB::open(data_path_str, index_path_str)?;
 
         Ok(Self { db })
     }
@@ -174,7 +184,11 @@ impl StateDb {
         };
 
         let key = format!("instance:{}", id);
-        self.db.delete(&key, None)?;
+        // Treat NotFound as success to keep deletes idempotent
+        match self.db.delete(&key, None) {
+            Ok(()) | Err(chrondb::ChronDBError::NotFound) => {}
+            Err(e) => return Err(e.into()),
+        }
 
         if is_active {
             // Ignore NotFound errors when cleaning up meta:active

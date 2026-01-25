@@ -2,7 +2,9 @@
 
 ## Status
 
-Superseded — Migrated to ChronDB (Git-backed document store) in `~/.spuff/chrondb/`
+Superseded
+
+Superseded by: ChronDB Git-backed document store in `~/.spuff/chrondb/`
 
 ## Date
 
