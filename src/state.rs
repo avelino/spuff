@@ -1,13 +1,14 @@
 //! Local state management for tracking active instances.
 //!
-//! This module provides SQLite-backed persistence for tracking which instances
+//! This module provides ChronDB-backed persistence for tracking which instances
 //! are currently active. This allows the CLI to maintain state across invocations.
 
 use std::path::PathBuf;
 
+use chrondb::ChronDB;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::config::AppConfig;
 use crate::error::Result;
@@ -67,7 +68,7 @@ impl LocalInstance {
     }
 
     /// Create a new LocalInstance with the current timestamp.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -88,138 +89,141 @@ impl LocalInstance {
     }
 }
 
-/// SQLite-backed state database.
+/// ChronDB-backed state database.
 pub struct StateDb {
-    conn: Connection,
+    db: ChronDB,
 }
 
 impl StateDb {
     /// Open or create the state database.
     pub fn open() -> Result<Self> {
-        let path = Self::db_path()?;
+        let base = Self::db_base_path()?;
+        std::fs::create_dir_all(&base)?;
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let data_path = base.join("data");
+        let index_path = base.join("index");
 
-        let conn = Connection::open(&path)?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS instances (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                region TEXT NOT NULL,
-                size TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                active INTEGER DEFAULT 1
-            )",
-            [],
+        let db = ChronDB::open(
+            data_path.to_str().unwrap_or_default(),
+            index_path.to_str().unwrap_or_default(),
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { db })
     }
 
-    fn db_path() -> Result<PathBuf> {
-        Ok(AppConfig::config_dir()?.join("state.db"))
+    fn db_base_path() -> Result<PathBuf> {
+        Ok(AppConfig::config_dir()?.join("chrondb"))
+    }
+
+    /// ChronDB overwrites the `id` field with the storage key (e.g. "instance:123").
+    /// This restores the original instance ID by stripping the prefix.
+    fn fix_instance_id(instance: &mut LocalInstance) {
+        if let Some(stripped) = instance.id.strip_prefix("instance:") {
+            instance.id = stripped.to_string();
+        }
     }
 
     /// Save an instance, marking it as the only active one.
     pub fn save_instance(&self, instance: &LocalInstance) -> Result<()> {
-        // First, mark all existing instances as inactive
-        self.conn.execute("UPDATE instances SET active = 0", [])?;
+        let doc = serde_json::to_value(instance)?;
+        let key = format!("instance:{}", instance.id);
 
-        // Insert or replace the new instance as active
-        self.conn.execute(
-            "INSERT OR REPLACE INTO instances (id, name, ip, provider, region, size, created_at, active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
-            params![
-                instance.id,
-                instance.name,
-                instance.ip,
-                instance.provider,
-                instance.region,
-                instance.size,
-                instance.created_at.to_rfc3339(),
-            ],
-        )?;
+        self.db.put(&key, &doc, None)?;
+        self.db
+            .put("meta:active", &json!({"instance_id": instance.id}), None)?;
 
         Ok(())
     }
 
     /// Get the currently active instance, if any.
     pub fn get_active_instance(&self) -> Result<Option<LocalInstance>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, ip, provider, region, size, created_at
-             FROM instances
-             WHERE active = 1
-             LIMIT 1",
-        )?;
+        let meta = match self.db.get("meta:active", None) {
+            Ok(val) => val,
+            Err(chrondb::ChronDBError::NotFound) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
 
-        let mut rows = stmt.query([])?;
+        let instance_id = match meta.get("instance_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => return Ok(None),
+        };
 
-        if let Some(row) = rows.next()? {
-            let created_at_str: String = row.get(6)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
+        let key = format!("instance:{}", instance_id);
+        let doc = match self.db.get(&key, None) {
+            Ok(val) => val,
+            Err(chrondb::ChronDBError::NotFound) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
 
-            Ok(Some(LocalInstance {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                ip: row.get(2)?,
-                provider: row.get(3)?,
-                region: row.get(4)?,
-                size: row.get(5)?,
-                created_at,
-            }))
-        } else {
-            Ok(None)
-        }
+        let mut instance: LocalInstance = serde_json::from_value(doc)?;
+        Self::fix_instance_id(&mut instance);
+        Ok(Some(instance))
     }
 
     /// Remove an instance from the database.
     pub fn remove_instance(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM instances WHERE id = ?1", params![id])?;
+        // Check if this is the active instance
+        let is_active = match self.db.get("meta:active", None) {
+            Ok(meta) => meta
+                .get("instance_id")
+                .and_then(|v| v.as_str())
+                .map(|active_id| active_id == id)
+                .unwrap_or(false),
+            Err(chrondb::ChronDBError::NotFound) => false,
+            Err(e) => return Err(e.into()),
+        };
+
+        let key = format!("instance:{}", id);
+        self.db.delete(&key, None)?;
+
+        if is_active {
+            // Ignore NotFound errors when cleaning up meta:active
+            match self.db.delete("meta:active", None) {
+                Ok(()) | Err(chrondb::ChronDBError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         Ok(())
     }
 
-    /// List all instances (including inactive ones).
-    #[allow(dead_code)]
+    /// List all instances.
+    #[cfg(test)]
     pub fn list_instances(&self) -> Result<Vec<LocalInstance>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, ip, provider, region, size, created_at FROM instances ORDER BY created_at DESC",
-        )?;
+        let docs = match self.db.list_by_table("instance", None) {
+            Ok(val) => val,
+            Err(chrondb::ChronDBError::NotFound) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
 
-        let instances = stmt
-            .query_map([], |row| {
-                let created_at_str: String = row.get(6)?;
-                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
-
-                Ok(LocalInstance {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    ip: row.get(2)?,
-                    provider: row.get(3)?,
-                    region: row.get(4)?,
-                    size: row.get(5)?,
-                    created_at,
+        let mut instances: Vec<LocalInstance> = match docs.as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .map(|mut i: LocalInstance| {
+                    Self::fix_instance_id(&mut i);
+                    i
                 })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+                .collect(),
+            None => Vec::new(),
+        };
 
+        instances.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(instances)
     }
 
     /// Update the IP address of an instance.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn update_instance_ip(&self, id: &str, ip: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE instances SET ip = ?1 WHERE id = ?2",
-            params![ip, id],
-        )?;
+        let key = format!("instance:{}", id);
+        let doc = self.db.get(&key, None)?;
+
+        let mut instance: LocalInstance = serde_json::from_value(doc)?;
+        instance.ip = ip.to_string();
+
+        let updated = serde_json::to_value(&instance)?;
+        self.db.put(&key, &updated, None)?;
+
         Ok(())
     }
 }
@@ -227,25 +231,21 @@ impl StateDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use std::sync::MutexGuard;
+    use tempfile::TempDir;
 
-    fn create_test_db() -> StateDb {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS instances (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                region TEXT NOT NULL,
-                size TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                active INTEGER DEFAULT 1
-            )",
-            [],
-        )
-        .unwrap();
-        StateDb { conn }
+    // GraalVM cannot handle multiple isolates concurrently in the same process.
+    static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn create_test_db() -> (StateDb, TempDir, MutexGuard<'static, ()>) {
+        let guard = DB_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let data_path = dir.path().join("data");
+        let index_path = dir.path().join("index");
+
+        let db = ChronDB::open(data_path.to_str().unwrap(), index_path.to_str().unwrap()).unwrap();
+
+        (StateDb { db }, dir, guard)
     }
 
     fn create_test_instance(id: &str, name: &str) -> LocalInstance {
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_save_and_get_instance() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
         let instance = create_test_instance("123", "spuff-test");
 
         db.save_instance(&instance).unwrap();
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_only_one_active_instance() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
 
         let instance1 = create_test_instance("111", "spuff-first");
         let instance2 = create_test_instance("222", "spuff-second");
@@ -293,14 +293,13 @@ mod tests {
         assert_eq!(active.id, "222");
         assert_eq!(active.name, "spuff-second");
 
-        // First instance should now be inactive
         let all = db.list_instances().unwrap();
         assert_eq!(all.len(), 2);
     }
 
     #[test]
     fn test_remove_instance() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
         let instance = create_test_instance("456", "spuff-remove");
 
         db.save_instance(&instance).unwrap();
@@ -312,14 +311,14 @@ mod tests {
 
     #[test]
     fn test_get_active_instance_none() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
         let result = db.get_active_instance().unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_list_instances() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
 
         let instance1 = create_test_instance("aaa", "spuff-a");
         let instance2 = create_test_instance("bbb", "spuff-b");
@@ -335,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_update_instance_ip() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
         let instance = create_test_instance("789", "spuff-ip-test");
 
         db.save_instance(&instance).unwrap();
@@ -347,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_instance_replace_on_same_id() {
-        let db = create_test_db();
+        let (db, _dir, _lock) = create_test_db();
 
         let instance1 = LocalInstance {
             id: "same-id".to_string(),
