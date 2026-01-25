@@ -44,7 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all
+      # ChronDB uses GraalVM which cannot handle multiple isolates concurrently.
+      # Force sequential test execution to avoid deadlocks.
+      - run: cargo test --all -- --test-threads=1
 
   build:
     name: Build
