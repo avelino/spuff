@@ -136,6 +136,131 @@ impl<'a> AiToolsInstaller<'a> {
             }
         }
     }
+
+    pub async fn install_cursor(&self) {
+        self.installer
+            .update_status("cursor", ToolStatus::Installing, None)
+            .await;
+
+        match self
+            .installer
+            .run_command("npm install -g @anthropics/cursor-cli")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("cursor --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("cursor", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("Cursor CLI installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("cursor", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("Cursor CLI installation failed: {}", e);
+            }
+        }
+    }
+
+    pub async fn install_cody(&self) {
+        self.installer
+            .update_status("cody", ToolStatus::Installing, None)
+            .await;
+
+        match self
+            .installer
+            .run_command("npm install -g @sourcegraph/cody")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("cody --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("cody", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("Sourcegraph Cody installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("cody", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("Sourcegraph Cody installation failed: {}", e);
+            }
+        }
+    }
+
+    pub async fn install_aider(&self) {
+        self.installer
+            .update_status("aider", ToolStatus::Installing, None)
+            .await;
+
+        // Aider is a Python package, install via pipx for isolation
+        match self
+            .installer
+            .run_command("pipx install aider-chat || pip install --user aider-chat")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("aider --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("aider", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("Aider installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("aider", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("Aider installation failed: {}", e);
+            }
+        }
+    }
+
+    pub async fn install_gemini(&self) {
+        self.installer
+            .update_status("gemini", ToolStatus::Installing, None)
+            .await;
+
+        match self
+            .installer
+            .run_command("npm install -g @anthropics/gemini-cli")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("gemini --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("gemini", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("Gemini CLI installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("gemini", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("Gemini CLI installation failed: {}", e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +299,30 @@ mod tests {
             npm_package: "@github/copilot",
             binary: "copilot",
             version_cmd: "copilot --version",
+        },
+        AiToolSpec {
+            id: "cursor",
+            npm_package: "@anthropics/cursor-cli",
+            binary: "cursor",
+            version_cmd: "cursor --version",
+        },
+        AiToolSpec {
+            id: "cody",
+            npm_package: "@sourcegraph/cody",
+            binary: "cody",
+            version_cmd: "cody --version",
+        },
+        AiToolSpec {
+            id: "aider",
+            npm_package: "aider-chat (pip)",
+            binary: "aider",
+            version_cmd: "aider --version",
+        },
+        AiToolSpec {
+            id: "gemini",
+            npm_package: "@anthropics/gemini-cli",
+            binary: "gemini",
+            version_cmd: "gemini --version",
         },
     ];
 
@@ -243,6 +392,10 @@ mod tests {
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
         assert!(tool_ids.contains(&"copilot"));
+        assert!(tool_ids.contains(&"cursor"));
+        assert!(tool_ids.contains(&"cody"));
+        assert!(tool_ids.contains(&"aider"));
+        assert!(tool_ids.contains(&"gemini"));
     }
 
     #[test]
@@ -256,6 +409,10 @@ mod tests {
         assert_eq!(specs.get("codex"), Some(&"@openai/codex"));
         assert_eq!(specs.get("opencode"), Some(&"opencode-ai"));
         assert_eq!(specs.get("copilot"), Some(&"@github/copilot"));
+        assert_eq!(specs.get("cursor"), Some(&"@anthropics/cursor-cli"));
+        assert_eq!(specs.get("cody"), Some(&"@sourcegraph/cody"));
+        assert_eq!(specs.get("aider"), Some(&"aider-chat (pip)"));
+        assert_eq!(specs.get("gemini"), Some(&"@anthropics/gemini-cli"));
     }
 
     /// Integration test: verify AI tools are in PATH after installation

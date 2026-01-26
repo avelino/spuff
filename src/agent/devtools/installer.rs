@@ -53,7 +53,7 @@ impl DevToolsInstaller {
             system.install_nodejs().await;
         }
 
-        // Phase 3: AI Coding Tools (all need Node.js)
+        // Phase 3: AI Coding Tools (most need Node.js, aider needs Python)
         let ai = AiToolsInstaller::new(self);
         if self.config.claude_code {
             ai.install_claude_code().await;
@@ -66,6 +66,18 @@ impl DevToolsInstaller {
         }
         if self.config.copilot {
             ai.install_copilot().await;
+        }
+        if self.config.cursor {
+            ai.install_cursor().await;
+        }
+        if self.config.cody {
+            ai.install_cody().await;
+        }
+        if self.config.aider {
+            ai.install_aider().await;
+        }
+        if self.config.gemini {
+            ai.install_gemini().await;
         }
 
         // Phase 4: Dev environment
