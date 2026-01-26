@@ -24,6 +24,26 @@ const AI_TOOLS: &[(&str, &str, &str)] = &[
         "GitHub Copilot CLI",
         "npm install -g @github/copilot",
     ),
+    (
+        "cursor",
+        "Cursor AI coding assistant CLI",
+        "npm install -g @anthropics/cursor-cli",
+    ),
+    (
+        "cody",
+        "Sourcegraph Cody AI assistant",
+        "npm install -g @sourcegraph/cody",
+    ),
+    (
+        "aider",
+        "AI pair programming with git integration",
+        "pipx install aider-chat",
+    ),
+    (
+        "gemini",
+        "Google Gemini AI CLI",
+        "npm install -g @anthropics/gemini-cli",
+    ),
 ];
 
 /// Response from agent's /devtools endpoint
@@ -191,18 +211,66 @@ pub async fn install(config: &AppConfig, tool: String) -> Result<()> {
 
     // Build config with only the requested tool enabled
     // Explicitly disable non-AI devtools to prevent reinstallation (serde defaults are true)
+    // Base config disables all AI tools and non-AI devtools
+    let base = r#""docker":false,"shell_tools":false,"nodejs":false"#;
+    let all_ai_false = r#""claude_code":false,"codex":false,"opencode":false,"copilot":false,"cursor":false,"cody":false,"aider":false,"gemini":false"#;
+
     let config_json = match tool.as_str() {
         "claude-code" => {
-            r#"{"claude_code":true,"codex":false,"opencode":false,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"claude_code\":false", "\"claude_code\":true"),
+                base
+            )
         }
         "codex" => {
-            r#"{"claude_code":false,"codex":true,"opencode":false,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"codex\":false", "\"codex\":true"),
+                base
+            )
         }
         "opencode" => {
-            r#"{"claude_code":false,"codex":false,"opencode":true,"copilot":false,"docker":false,"shell_tools":false,"nodejs":false}"#
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"opencode\":false", "\"opencode\":true"),
+                base
+            )
         }
         "copilot" => {
-            r#"{"claude_code":false,"codex":false,"opencode":false,"copilot":true,"docker":false,"shell_tools":false,"nodejs":false}"#
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"copilot\":false", "\"copilot\":true"),
+                base
+            )
+        }
+        "cursor" => {
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"cursor\":false", "\"cursor\":true"),
+                base
+            )
+        }
+        "cody" => {
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"cody\":false", "\"cody\":true"),
+                base
+            )
+        }
+        "aider" => {
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"aider\":false", "\"aider\":true"),
+                base
+            )
+        }
+        "gemini" => {
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"gemini\":false", "\"gemini\":true"),
+                base
+            )
         }
         _ => unreachable!(),
     };
@@ -281,6 +349,31 @@ pub async fn info(tool: &str) -> Result<()> {
             println!("    Requires active GitHub Copilot subscription");
             println!("    Auth: /login command or GH_TOKEN/GITHUB_TOKEN env var");
             println!("    Documentation: https://github.com/github/copilot-cli");
+        }
+        "cursor" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    Requires Cursor account and API key");
+            println!("    Set CURSOR_API_KEY environment variable");
+            println!("    Documentation: https://cursor.sh/docs");
+        }
+        "cody" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    Requires Sourcegraph account");
+            println!("    Set SRC_ACCESS_TOKEN and SRC_ENDPOINT env vars");
+            println!("    Documentation: https://sourcegraph.com/docs/cody");
+        }
+        "aider" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    Works with multiple AI providers (OpenAI, Anthropic, etc.)");
+            println!("    Set OPENAI_API_KEY or ANTHROPIC_API_KEY env var");
+            println!("    Excellent git integration for pair programming");
+            println!("    Documentation: https://aider.chat");
+        }
+        "gemini" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    Requires Google AI API key");
+            println!("    Set GOOGLE_API_KEY environment variable");
+            println!("    Documentation: https://ai.google.dev/docs");
         }
         _ => {}
     }

@@ -93,6 +93,26 @@ impl DevToolsManager {
             self.update_tool_status("opencode", ToolStatus::Skipped, None)
                 .await;
         }
+        if !config.copilot {
+            self.update_tool_status("copilot", ToolStatus::Skipped, None)
+                .await;
+        }
+        if !config.cursor {
+            self.update_tool_status("cursor", ToolStatus::Skipped, None)
+                .await;
+        }
+        if !config.cody {
+            self.update_tool_status("cody", ToolStatus::Skipped, None)
+                .await;
+        }
+        if !config.aider {
+            self.update_tool_status("aider", ToolStatus::Skipped, None)
+                .await;
+        }
+        if !config.gemini {
+            self.update_tool_status("gemini", ToolStatus::Skipped, None)
+                .await;
+        }
         if config.environment.is_none() {
             self.update_tool_status("devenv", ToolStatus::Skipped, None)
                 .await;

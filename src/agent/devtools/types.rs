@@ -61,6 +61,22 @@ pub struct DevToolsConfig {
     #[serde(default = "default_true")]
     pub copilot: bool,
 
+    /// Install Cursor CLI
+    #[serde(default = "default_true")]
+    pub cursor: bool,
+
+    /// Install Sourcegraph Cody CLI
+    #[serde(default = "default_true")]
+    pub cody: bool,
+
+    /// Install Aider (AI pair programming)
+    #[serde(default = "default_true")]
+    pub aider: bool,
+
+    /// Install Google Gemini CLI
+    #[serde(default = "default_true")]
+    pub gemini: bool,
+
     /// Dev environment: "devbox", "nix", or empty
     #[serde(default)]
     pub environment: Option<String>,
@@ -183,6 +199,34 @@ impl Default for DevToolsState {
                     version: None,
                 },
                 DevTool {
+                    id: "cursor",
+                    name: "Cursor CLI",
+                    description: "AI coding assistant (Cursor)",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
+                    id: "cody",
+                    name: "Sourcegraph Cody",
+                    description: "AI coding assistant (Sourcegraph)",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
+                    id: "aider",
+                    name: "Aider",
+                    description: "AI pair programming with git integration",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
+                    id: "gemini",
+                    name: "Gemini CLI",
+                    description: "AI coding assistant (Google)",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
                     id: "devenv",
                     name: "Dev Environment",
                     description: "Devbox or Nix",
@@ -224,6 +268,10 @@ mod tests {
         assert!(config.codex, "codex should default to true via serde");
         assert!(config.opencode, "opencode should default to true via serde");
         assert!(config.copilot, "copilot should default to true via serde");
+        assert!(config.cursor, "cursor should default to true via serde");
+        assert!(config.cody, "cody should default to true via serde");
+        assert!(config.aider, "aider should default to true via serde");
+        assert!(config.gemini, "gemini should default to true via serde");
         assert!(config.docker, "docker should default to true via serde");
         assert!(
             config.shell_tools,
@@ -253,6 +301,10 @@ mod tests {
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
         assert!(tool_ids.contains(&"copilot"));
+        assert!(tool_ids.contains(&"cursor"));
+        assert!(tool_ids.contains(&"cody"));
+        assert!(tool_ids.contains(&"aider"));
+        assert!(tool_ids.contains(&"gemini"));
         assert!(tool_ids.contains(&"devenv"));
         assert!(tool_ids.contains(&"dotfiles"));
         assert!(tool_ids.contains(&"tailscale"));

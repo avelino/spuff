@@ -158,7 +158,16 @@ impl AiToolsConfig {
     /// Get list of tools to install
     pub fn tools_to_install(&self) -> Vec<&str> {
         match self {
-            AiToolsConfig::All => vec!["claude-code", "codex", "opencode", "copilot"],
+            AiToolsConfig::All => vec![
+                "claude-code",
+                "codex",
+                "opencode",
+                "copilot",
+                "cursor",
+                "cody",
+                "aider",
+                "gemini",
+            ],
             AiToolsConfig::None => vec![],
             AiToolsConfig::List(tools) => tools.iter().map(|s| s.as_str()).collect(),
         }
@@ -674,6 +683,10 @@ ai_tools: all
         assert!(config.ai_tools.should_install("codex"));
         assert!(config.ai_tools.should_install("opencode"));
         assert!(config.ai_tools.should_install("copilot"));
+        assert!(config.ai_tools.should_install("cursor"));
+        assert!(config.ai_tools.should_install("cody"));
+        assert!(config.ai_tools.should_install("aider"));
+        assert!(config.ai_tools.should_install("gemini"));
     }
 
     #[test]
@@ -686,6 +699,10 @@ ai_tools: none
         assert!(!config.ai_tools.should_install("codex"));
         assert!(!config.ai_tools.should_install("opencode"));
         assert!(!config.ai_tools.should_install("copilot"));
+        assert!(!config.ai_tools.should_install("cursor"));
+        assert!(!config.ai_tools.should_install("cody"));
+        assert!(!config.ai_tools.should_install("aider"));
+        assert!(!config.ai_tools.should_install("gemini"));
     }
 
     #[test]
@@ -721,7 +738,16 @@ ai_tools:
     fn test_ai_tools_tools_to_install() {
         assert_eq!(
             AiToolsConfig::All.tools_to_install(),
-            vec!["claude-code", "codex", "opencode", "copilot"]
+            vec![
+                "claude-code",
+                "codex",
+                "opencode",
+                "copilot",
+                "cursor",
+                "cody",
+                "aider",
+                "gemini"
+            ]
         );
         assert!(AiToolsConfig::None.tools_to_install().is_empty());
 
