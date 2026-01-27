@@ -49,6 +49,8 @@ jobs:
           environment: devbox
           volumes: []
           EOF
+          sed -i 's/^          //' ~/.spuff/config.yaml
+          echo "=== Config file ===" && cat ~/.spuff/config.yaml
 
       - name: Generate SSH key for tests
         run: |
@@ -211,6 +213,8 @@ jobs:
           environment: devbox
           volumes: []
           EOF
+          sed -i 's/^          //' ~/.spuff/config.yaml
+          echo "=== Config file ===" && cat ~/.spuff/config.yaml
 
       - name: Generate SSH key
         run: |
@@ -225,23 +229,20 @@ jobs:
           cat > spuff.yaml << 'EOF'
           name: e2e-test-project
 
-          # Test packages installation
           packages:
             - curl
             - jq
 
-          # Test setup scripts
           setup:
             - echo "Setup script 1 executed" > /tmp/setup-marker-1.txt
             - echo "Setup script 2 executed" > /tmp/setup-marker-2.txt
 
-          # Test environment variables
           env:
             E2E_TEST_VAR: "hello-from-e2e"
             PROJECT_NAME: "test-project"
           EOF
-
-          cat spuff.yaml
+          sed -i 's/^          //' spuff.yaml
+          echo "=== spuff.yaml ===" && cat spuff.yaml
 
       - name: Test spuff up with project config
         working-directory: /tmp/test-project
