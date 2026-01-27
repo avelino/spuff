@@ -10,7 +10,7 @@ use crate::connector::ssh::{wait_for_ssh, wait_for_ssh_login};
 use crate::environment::cloud_init::generate_cloud_init_with_ai_tools;
 use crate::error::{Result, SpuffError};
 use crate::project_config::{AiToolsConfig, ProjectConfig};
-use crate::provider::{create_provider, ImageSpec, InstanceRequest};
+use crate::provider::{create_provider, ImageSpec, InstanceRequest, VolumeMount};
 use crate::ssh::{is_key_in_agent, is_ssh_agent_running, key_has_passphrase, SshClient, SshConfig};
 use crate::state::{LocalInstance, StateDb};
 use crate::tui::{run_progress_ui, ProgressMessage, StepState};
@@ -609,6 +609,14 @@ async fn provision_instance(
         .unwrap_or_else(|| params.config.region.clone());
     let instance_size = params.size.unwrap_or_else(|| params.config.size.clone());
     let image = get_image_spec(&params.config.provider, params.snapshot);
+    let is_docker = params.config.provider == "docker" || params.config.provider == "local";
+
+    // Build volume mounts for Docker provider
+    let volume_mounts = if is_docker {
+        build_docker_volume_mounts(&params.config, params.project_config.as_ref())
+    } else {
+        Vec::new()
+    };
 
     let request = InstanceRequest::new(
         instance_name.clone(),
@@ -618,7 +626,8 @@ async fn provision_instance(
     .with_image(image)
     .with_user_data(user_data)
     .with_label("spuff", "true")
-    .with_label("managed-by", "spuff-cli");
+    .with_label("managed-by", "spuff-cli")
+    .with_volumes(volume_mounts);
 
     let instance = match provider.create_instance(&request).await {
         Ok(i) => i,
@@ -1438,6 +1447,48 @@ async fn sync_to_vm(
         remote_path
     );
     Ok(())
+}
+
+/// Build volume mounts for Docker provider from config and project config.
+///
+/// Merges global volumes with project-specific volumes, converting them to
+/// Docker bind mount format for container creation.
+fn build_docker_volume_mounts(
+    config: &AppConfig,
+    project_config: Option<&ProjectConfig>,
+) -> Vec<VolumeMount> {
+    let mut mounts = Vec::new();
+
+    // Add global volumes from config
+    for vol in &config.volumes {
+        let source = vol.resolve_source(None);
+        if !source.is_empty() {
+            mounts.push(VolumeMount {
+                source,
+                target: vol.target.clone(),
+                read_only: vol.read_only,
+            });
+        }
+    }
+
+    // Add project volumes (override globals with same target)
+    if let Some(pc) = project_config {
+        for vol in &pc.volumes {
+            // Remove any global volume with the same target
+            mounts.retain(|m| m.target != vol.target);
+
+            let source = vol.resolve_source(pc.base_dir.as_deref());
+            if !source.is_empty() {
+                mounts.push(VolumeMount {
+                    source,
+                    target: vol.target.clone(),
+                    read_only: vol.read_only,
+                });
+            }
+        }
+    }
+
+    mounts
 }
 
 /// Check if a source path is a file (not directory)

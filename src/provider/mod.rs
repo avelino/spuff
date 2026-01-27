@@ -44,7 +44,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // Re-export commonly used types
-pub use config::{ImageSpec, InstanceRequest, ProviderTimeouts, ProviderType};
+pub use config::{ImageSpec, InstanceRequest, ProviderTimeouts, ProviderType, VolumeMount};
 pub use error::{ProviderError, ProviderResult};
 pub use registry::ProviderRegistry;
 
@@ -88,6 +88,7 @@ impl From<InstanceConfig> for InstanceRequest {
             image,
             user_data: config.user_data,
             labels,
+            volumes: Vec::new(),
         }
     }
 }

@@ -155,6 +155,22 @@ impl Provider for DockerProvider {
         let mut exposed_ports = HashMap::new();
         exposed_ports.insert("7575/tcp".to_string(), HashMap::new());
 
+        // Build bind mounts from volumes
+        let binds: Option<Vec<String>> = if request.volumes.is_empty() {
+            None
+        } else {
+            Some(
+                request
+                    .volumes
+                    .iter()
+                    .map(|v| {
+                        let mode = if v.read_only { "ro" } else { "rw" };
+                        format!("{}:{}:{}", v.source, v.target, mode)
+                    })
+                    .collect(),
+            )
+        };
+
         // Create container config
         let config = Config {
             image: Some(image),
@@ -162,6 +178,7 @@ impl Provider for DockerProvider {
             exposed_ports: Some(exposed_ports),
             host_config: Some(HostConfig {
                 port_bindings: Some(port_bindings),
+                binds,
                 ..Default::default()
             }),
             // Keep container running with sleep infinity
