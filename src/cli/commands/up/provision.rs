@@ -66,11 +66,8 @@ pub async fn provision_instance(
     .await
     .ok();
 
-    let user_data = generate_cloud_init_with_ai_tools(
-        &config,
-        project_config.as_ref(),
-        cli_ai_tools.as_ref(),
-    )?;
+    let user_data =
+        generate_cloud_init_with_ai_tools(&config, project_config.as_ref(), cli_ai_tools.as_ref())?;
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();
@@ -195,8 +192,12 @@ pub async fn provision_instance(
         .ok();
 
         // First wait for SSH port to be open
-        if let Err(e) =
-            crate::connector::ssh::wait_for_ssh(&instance.ip.to_string(), 22, Duration::from_secs(300)).await
+        if let Err(e) = crate::connector::ssh::wait_for_ssh(
+            &instance.ip.to_string(),
+            22,
+            Duration::from_secs(300),
+        )
+        .await
         {
             tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
                 .await
@@ -461,8 +462,14 @@ async fn mount_cloud_volumes(
 
         // Sync source to VM if defined
         if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
-            if let Err(e) = sync_to_vm(ip, &config.ssh_user, &ssh_key_str, &source_path, &vol.target)
-                .await
+            if let Err(e) = sync_to_vm(
+                ip,
+                &config.ssh_user,
+                &ssh_key_str,
+                &source_path,
+                &vol.target,
+            )
+            .await
             {
                 tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
             } else if is_file {
@@ -502,10 +509,7 @@ async fn mount_cloud_volumes(
                     .with_read_only(vol.read_only);
                 state.add_mount(handle);
                 if let Err(e) = state.save() {
-                    tracing::error!(
-                        "Failed to save volume state: {}. Mount may not persist.",
-                        e
-                    );
+                    tracing::error!("Failed to save volume state: {}. Mount may not persist.", e);
                 }
             }
             Err(e) => {

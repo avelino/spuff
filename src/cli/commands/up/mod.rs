@@ -22,7 +22,7 @@ use crate::tui::{run_progress_ui, ProgressMessage};
 
 use build::{build_linux_agent, LINUX_TARGET};
 use display::print_project_summary;
-use preflight::{verify_sshfs_available, verify_ssh_key_accessible};
+use preflight::{verify_ssh_key_accessible, verify_sshfs_available};
 use provision::{provision_instance, ProvisionParams};
 
 // Step constants used across modules
