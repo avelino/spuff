@@ -5,14 +5,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # ChronDB (GraalVM native-image) requires large stack
+  RUST_MIN_STACK: 33554432
 
 jobs:
   e2e-docker:
     name: E2E Tests (Docker)
     runs-on: ubuntu-latest
-    # ChronDB (GraalVM) has known issues on Linux CI environments
-    # These tests are informational only until ChronDB is more stable
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -33,6 +32,12 @@ jobs:
           key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-e2e-
+
+      - name: Cache ChronDB native library
+        uses: actions/cache@v4
+        with:
+          path: ~/.chrondb/lib/
+          key: ${{ runner.os }}-chrondb-lib-latest
 
       - name: Build release binaries
         run: cargo build --release
@@ -179,8 +184,6 @@ jobs:
   e2e-docker-project:
     name: E2E Tests (Docker with Project Config)
     runs-on: ubuntu-latest
-    # ChronDB (GraalVM) has known issues on Linux CI environments
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -201,6 +204,12 @@ jobs:
           key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-e2e-
+
+      - name: Cache ChronDB native library
+        uses: actions/cache@v4
+        with:
+          path: ~/.chrondb/lib/
+          key: ${{ runner.os }}-chrondb-lib-latest
 
       - name: Build release binaries
         run: cargo build --release
