@@ -41,13 +41,18 @@ jobs:
       - name: Build release binaries
         run: cargo build --release
 
-      - name: Create spuff wrapper with ulimit for GraalVM
+      - name: Create spuff wrapper with prlimit for GraalVM
         run: |
           mkdir -p ~/.local/bin
+          # Check current limits
+          echo "=== Stack limits ==="
+          ulimit -a | grep stack
+          cat /proc/self/limits | grep -i stack || true
+          # Create wrapper that uses prlimit to set stack before exec
           cat > ~/.local/bin/spuff << 'EOF'
           #!/bin/bash
-          ulimit -s unlimited
-          exec "$GITHUB_WORKSPACE/target/release/spuff" "$@"
+          # Use prlimit to set unlimited stack for the new process
+          exec prlimit --stack=unlimited "$GITHUB_WORKSPACE/target/release/spuff" "$@"
           EOF
           chmod +x ~/.local/bin/spuff
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -224,13 +229,18 @@ jobs:
       - name: Build release binaries
         run: cargo build --release
 
-      - name: Create spuff wrapper with ulimit for GraalVM
+      - name: Create spuff wrapper with prlimit for GraalVM
         run: |
           mkdir -p ~/.local/bin
+          # Check current limits
+          echo "=== Stack limits ==="
+          ulimit -a | grep stack
+          cat /proc/self/limits | grep -i stack || true
+          # Create wrapper that uses prlimit to set stack before exec
           cat > ~/.local/bin/spuff << 'EOF'
           #!/bin/bash
-          ulimit -s unlimited
-          exec "$GITHUB_WORKSPACE/target/release/spuff" "$@"
+          # Use prlimit to set unlimited stack for the new process
+          exec prlimit --stack=unlimited "$GITHUB_WORKSPACE/target/release/spuff" "$@"
           EOF
           chmod +x ~/.local/bin/spuff
           echo "$HOME/.local/bin" >> $GITHUB_PATH
