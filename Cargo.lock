@@ -396,7 +396,9 @@ dependencies = [
 
 [[package]]
 name = "chrondb"
-version = "0.1.0"
+version = "0.0.0-dev.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "368604f8bc798e8e64f8bcf33d5de7f7f24c8f330dc28481854995f40b23aa10"
 dependencies = [
  "dirs 5.0.1",
  "flate2",

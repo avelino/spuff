@@ -71,8 +71,7 @@ sysinfo = "0.33"
 uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
-# chrondb = "0.0.0-dev.7"
-chrondb = { path = "/Users/avelino/projects/moclojer/chrondb/bindings/rust" }
+chrondb = "0.0.0-dev.8"
 
 # Base64 for cloud-init
 base64 = "0.22"

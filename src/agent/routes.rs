@@ -228,6 +228,21 @@ struct ExecResponse {
     duration_ms: u64,
 }
 
+/// Truncate output string for logging, replacing newlines with \n literal.
+fn truncate_output(s: &str, max_len: usize) -> String {
+    // Replace newlines and tabs with escaped versions for single-line storage
+    let escaped = s
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+
+    if escaped.len() <= max_len {
+        escaped
+    } else {
+        format!("{}...", &escaped[..max_len])
+    }
+}
+
 /// POST /exec - Execute a command (EXPERIMENTAL, requires authentication)
 ///
 /// # Security Warning
@@ -266,19 +281,26 @@ async fn exec(
     match result {
         Ok(Ok(output)) => {
             let exit_code = output.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+            // Truncate output for logging (max 500 chars each)
+            let stdout_preview = truncate_output(&stdout, 500);
+            let stderr_preview = truncate_output(&stderr, 500);
+
             state
                 .log_activity(
                     "exec",
                     Some(format!(
-                        "cmd='{}' exit={} duration={}ms",
-                        cmd_preview, exit_code, duration_ms
+                        "cmd='{}' exit={} duration={}ms\t{}\t{}",
+                        cmd_preview, exit_code, duration_ms, stdout_preview, stderr_preview
                     )),
                 )
                 .await;
             Ok(Json(ExecResponse {
                 exit_code,
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout,
+                stderr,
                 duration_ms,
             }))
         }
@@ -326,6 +348,10 @@ struct ExecLogEntry {
     timestamp: String,
     event: String,
     details: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
 }
 
 /// GET /exec-log - Get command execution history (requires authentication)
@@ -355,16 +381,24 @@ async fn exec_log(
         )
     })?;
 
-    // Parse TSV format: timestamp\tevent\tdetails
+    // Parse TSV format: timestamp\tevent\tdetails[\tstdout\tstderr]
     let entries: Vec<ExecLogEntry> = lines_vec
         .into_iter()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            let parts: Vec<&str> = line.splitn(5, '\t').collect();
             if parts.len() >= 2 {
                 Some(ExecLogEntry {
                     timestamp: parts[0].to_string(),
                     event: parts[1].to_string(),
                     details: parts.get(2).unwrap_or(&"").to_string(),
+                    stdout: parts
+                        .get(3)
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty()),
+                    stderr: parts
+                        .get(4)
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty()),
                 })
             } else {
                 None

@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use console::style;
 use serde::{Deserialize, Serialize};
 
@@ -5,6 +7,17 @@ use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
 use crate::state::StateDb;
 use crate::utils::{format_bytes, format_duration, truncate};
+
+/// Commands known to require interactive TTY (editors, pagers, monitors, REPLs).
+const INTERACTIVE_COMMANDS: &[&str] = &[
+    // Editors
+    "vim", "vi", "nano", "emacs", "nvim", "helix", "hx", // Pagers
+    "less", "more", "man", // Monitors
+    "htop", "top", "iotop", "btop", "glances", "nmon", // REPLs
+    "python", "python3", "node", "irb", "iex", "ghci", "lua", "erl", // Multiplexers
+    "tmux", "screen", // Interactive git commands (partial matches handled separately)
+    "tig",
+];
 
 #[derive(Debug, Deserialize)]
 struct AgentStatus {
@@ -69,6 +82,10 @@ struct ExecLogEntry {
     timestamp: String,
     event: String,
     details: String,
+    #[serde(default)]
+    stdout: Option<String>,
+    #[serde(default)]
+    stderr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +93,16 @@ struct ExecLogResponse {
     entries: Vec<ExecLogEntry>,
     #[allow(dead_code)]
     count: usize,
+}
+
+/// Response from agent's /exec endpoint.
+#[derive(Debug, Deserialize)]
+struct AgentExecResponse {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    #[allow(dead_code)]
+    duration_ms: u64,
 }
 
 pub async fn status(config: &AppConfig) -> Result<()> {
@@ -224,17 +251,110 @@ pub async fn processes(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub async fn exec(config: &AppConfig, command: String) -> Result<()> {
+/// Execute a command on the remote environment.
+///
+/// Automatically chooses between:
+/// - Agent HTTP: faster, lower overhead, good for non-interactive commands
+/// - SSH with TTY: required for interactive commands (editors, REPLs, etc.)
+///
+/// The decision can be overridden with `-t` (force TTY) or `-T` (force no TTY).
+pub async fn exec(
+    config: &AppConfig,
+    command: String,
+    force_tty: bool,
+    no_tty: bool,
+) -> Result<()> {
     let db = StateDb::open()?;
     let instance = db
         .get_active_instance()?
         .ok_or(SpuffError::NoActiveInstance)?;
 
-    // Use SSH with TTY for interactive command execution
-    let exit_code = crate::connector::ssh::exec_interactive(&instance.ip, config, &command).await?;
+    let needs_tty = match (force_tty, no_tty) {
+        (true, _) => true,  // -t flag: force TTY
+        (_, true) => false, // -T flag: force no TTY
+        _ => detect_needs_tty(&command),
+    };
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if needs_tty {
+        // Interactive mode via SSH with PTY
+        let exit_code =
+            crate::connector::ssh::exec_interactive(&instance.ip, config, &command).await?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    } else {
+        // Non-interactive mode via agent HTTP (faster)
+        exec_via_agent(&instance.ip, config, &command).await?;
+    }
+
+    Ok(())
+}
+
+/// Detect if a command needs TTY based on:
+/// 1. Whether stdout is a terminal (if piped, no TTY needed)
+/// 2. Whether the command is in the list of known interactive commands
+fn detect_needs_tty(command: &str) -> bool {
+    // If stdout is not a terminal (e.g., piped), don't need TTY
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+
+    // Check if command is known to be interactive
+    is_interactive_command(command)
+}
+
+/// Check if a command is known to require interactive TTY.
+fn is_interactive_command(command: &str) -> bool {
+    // Get the base command (first word)
+    let base_cmd = command
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+
+    // Check direct match
+    if INTERACTIVE_COMMANDS.contains(&base_cmd) {
+        return true;
+    }
+
+    // Check for interactive git commands
+    if base_cmd == "git" {
+        let cmd_lower = command.to_lowercase();
+        if cmd_lower.contains(" -i")
+            || cmd_lower.contains(" -p")
+            || cmd_lower.contains(" add -i")
+            || cmd_lower.contains(" add -p")
+            || cmd_lower.contains(" rebase -i")
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Execute command via agent HTTP endpoint.
+async fn exec_via_agent(ip: &str, config: &AppConfig, command: &str) -> Result<()> {
+    let response: AgentExecResponse = agent_request_post(
+        ip,
+        config,
+        "/exec",
+        &serde_json::json!({ "command": command }),
+    )
+    .await?;
+
+    // Output stdout/stderr
+    if !response.stdout.is_empty() {
+        print!("{}", response.stdout);
+    }
+    if !response.stderr.is_empty() {
+        eprint!("{}", response.stderr);
+    }
+
+    if response.exit_code != 0 {
+        std::process::exit(response.exit_code);
     }
 
     Ok(())
@@ -334,13 +454,7 @@ pub async fn exec_log(config: &AppConfig, lines: usize) -> Result<()> {
         println!("{}", style("No exec commands logged yet").dim());
     } else {
         println!("{}", style("Exec Log (persistent)").bold().cyan());
-        println!(
-            "  {:<20} {:<15} {}",
-            style("TIMESTAMP").dim(),
-            style("EVENT").dim(),
-            style("DETAILS").dim()
-        );
-        println!("  {}", "-".repeat(70));
+        println!();
 
         for entry in &response.entries {
             let time = if entry.timestamp.len() >= 19 {
@@ -356,11 +470,35 @@ pub async fn exec_log(config: &AppConfig, lines: usize) -> Result<()> {
             };
 
             println!(
-                "  {:<20} {:<15} {}",
+                "  {} {} {}",
                 style(time).dim(),
                 event_style,
                 style(&entry.details).white()
             );
+
+            // Show stdout if present
+            if let Some(stdout) = &entry.stdout {
+                if !stdout.is_empty() {
+                    let output = unescape_output(stdout);
+                    println!(
+                        "    {} {}",
+                        style("stdout:").green().dim(),
+                        style(&output).dim()
+                    );
+                }
+            }
+
+            // Show stderr if present
+            if let Some(stderr) = &entry.stderr {
+                if !stderr.is_empty() {
+                    let output = unescape_output(stderr);
+                    println!(
+                        "    {} {}",
+                        style("stderr:").red().dim(),
+                        style(&output).dim()
+                    );
+                }
+            }
         }
 
         println!();
@@ -372,6 +510,19 @@ pub async fn exec_log(config: &AppConfig, lines: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Unescape output from log (convert \\n back to actual newlines for display)
+fn unescape_output(s: &str) -> String {
+    // Truncate long output for display
+    let truncated = if s.len() > 200 {
+        format!("{}...", &s[..200])
+    } else {
+        s.to_string()
+    };
+
+    // Keep it single-line but show literal \n for readability
+    truncated
 }
 
 fn print_activity_entry(entry: &ActivityLogEntry) {
@@ -535,6 +686,37 @@ async fn agent_request<T: serde::de::DeserializeOwned>(
         ip,
         config,
         &format!("curl -s http://127.0.0.1:7575{}", endpoint),
+    )
+    .await?;
+
+    // Extract JSON from output (may contain banner text from shell profile)
+    let json_str = extract_json(&output);
+
+    serde_json::from_str(json_str).map_err(|e| {
+        SpuffError::Provider(format!(
+            "Failed to parse agent response: {}. Response: {}",
+            e, output
+        ))
+    })
+}
+
+/// Make a POST request to the agent with JSON body.
+async fn agent_request_post<T: serde::de::DeserializeOwned>(
+    ip: &str,
+    config: &AppConfig,
+    endpoint: &str,
+    body: &serde_json::Value,
+) -> Result<T> {
+    // Escape single quotes in JSON for shell
+    let json_body = body.to_string().replace('\'', "'\\''");
+
+    let output = crate::connector::ssh::run_command(
+        ip,
+        config,
+        &format!(
+            "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:7575{}",
+            json_body, endpoint
+        ),
     )
     .await?;
 
