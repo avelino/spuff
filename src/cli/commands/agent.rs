@@ -8,9 +8,10 @@ use crate::error::{Result, SpuffError};
 use crate::state::StateDb;
 use crate::utils::{format_bytes, format_duration, truncate};
 
-/// Commands known to require interactive TTY (editors, pagers, monitors, REPLs).
+/// Commands known to require interactive TTY (editors, pagers, monitors, REPLs, shells).
 const INTERACTIVE_COMMANDS: &[&str] = &[
-    // Editors
+    // Shells
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", // Editors
     "vim", "vi", "nano", "emacs", "nvim", "helix", "hx", // Pagers
     "less", "more", "man", // Monitors
     "htop", "top", "iotop", "btop", "glances", "nmon", // REPLs
