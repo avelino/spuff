@@ -150,6 +150,7 @@ spuff agent metrics         # JSON metrics output
 spuff agent processes       # Top processes by CPU
 spuff agent logs            # View cloud-init logs
 spuff agent logs -n 50      # Last 50 lines
+spuff agent exec-log        # Command execution history with stdout/stderr
 
 # Devtools management
 spuff agent devtools status   # Show devtools installation progress
@@ -172,7 +173,10 @@ spuff config set region nyc3
 spuff config edit           # Open in $EDITOR
 
 # Execute remote commands
-spuff exec "uname -a"       # Run command on remote
+spuff exec "uname -a"       # Auto-detect: uses agent HTTP (fast)
+spuff exec "htop"           # Auto-detect: uses SSH TTY (interactive)
+spuff exec -t "python"      # Force TTY allocation
+spuff exec -T "cargo build" # Force agent HTTP (no TTY)
 ```
 
 ## Configuration

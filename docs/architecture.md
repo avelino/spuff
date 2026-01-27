@@ -486,7 +486,9 @@ Bootstrap status values:
 
 Returns top 10 processes by CPU usage.
 
-#### POST /exec (authenticated, experimental)
+#### POST /exec (authenticated)
+
+Execute a command on the remote environment. Used by `spuff exec` for non-interactive commands.
 
 ```json
 // Request
@@ -503,6 +505,27 @@ Returns top 10 processes by CPU usage.
   "duration_ms": 15
 }
 ```
+
+#### GET /exec-log?lines=50 (authenticated)
+
+Returns persistent log of all commands executed via `/exec`. Useful for auditing and debugging.
+
+```json
+{
+  "entries": [
+    {
+      "timestamp": "2024-01-01T12:00:00Z",
+      "event": "exec",
+      "details": "cmd='ls -la' exit=0 duration=5ms",
+      "stdout": "total 4\\ndrwxr-xr-x ...",
+      "stderr": null
+    }
+  ],
+  "count": 1
+}
+```
+
+The `stdout` and `stderr` fields are truncated to 500 characters and have newlines escaped as `\n`.
 
 #### POST /heartbeat (authenticated)
 
