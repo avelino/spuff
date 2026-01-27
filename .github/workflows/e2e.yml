@@ -12,6 +12,9 @@ jobs:
   e2e-docker:
     name: E2E Tests (Docker)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -c 'ulimit -s unlimited && exec bash -e {0}'
 
     steps:
       - name: Checkout
@@ -184,6 +187,9 @@ jobs:
   e2e-docker-project:
     name: E2E Tests (Docker with Project Config)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -c 'ulimit -s unlimited && exec bash -e {0}'
 
     steps:
       - name: Checkout
