@@ -46,6 +46,7 @@ jobs:
           idle_timeout: 30m
           region: local
           size: default
+          environment: devbox
           volumes: []
           EOF
 
@@ -207,6 +208,7 @@ jobs:
           idle_timeout: 30m
           region: local
           size: default
+          environment: devbox
           volumes: []
           EOF
 
