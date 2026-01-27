@@ -32,6 +32,24 @@ pub struct InstanceRequest {
 
     /// Labels/tags for the instance
     pub labels: HashMap<String, String>,
+
+    /// Volume mounts (used by Docker provider for bind mounts)
+    #[serde(default)]
+    pub volumes: Vec<VolumeMount>,
+}
+
+/// Volume mount configuration for Docker provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeMount {
+    /// Source path on the host machine
+    pub source: String,
+
+    /// Target path inside the container
+    pub target: String,
+
+    /// Mount as read-only
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl InstanceRequest {
@@ -48,6 +66,7 @@ impl InstanceRequest {
             image: ImageSpec::default(),
             user_data: None,
             labels: HashMap::new(),
+            volumes: Vec::new(),
         }
     }
 
@@ -73,6 +92,12 @@ impl InstanceRequest {
     #[allow(dead_code)]
     pub fn with_labels(mut self, labels: HashMap<String, String>) -> Self {
         self.labels.extend(labels);
+        self
+    }
+
+    /// Add volume mounts (used by Docker provider)
+    pub fn with_volumes(mut self, volumes: Vec<VolumeMount>) -> Self {
+        self.volumes = volumes;
         self
     }
 }
