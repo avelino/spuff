@@ -11,13 +11,20 @@ use std::sync::Arc;
 use axum::{
     extract::{FromRequestParts, Query},
     http::{request::Parts, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::time::Duration;
 
 use crate::devtools::DevToolsConfig;
+use crate::docker_manager::{ComposeManager, DockerManager};
 use crate::metrics::get_top_processes;
 use crate::project_setup::ProjectSetupManager;
 use crate::volume_manager::AgentVolumeManager;
@@ -42,6 +49,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .route("/exec-log", get(exec_log))
         .route("/heartbeat", post(heartbeat))
         .route("/logs", get(logs))
+        .route("/logs/stream", get(logs_stream))
         .route("/cloud-init", get(cloud_init_status))
         .route("/activity", get(activity_log))
         // Devtools management
@@ -55,6 +63,20 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .route("/volumes", get(volumes_list))
         .route("/volumes/status", get(volumes_status))
         .route("/volumes/unmount", post(volumes_unmount))
+        // Graceful shutdown
+        .route("/shutdown", post(shutdown))
+        // Docker management
+        .route("/services/docker", get(docker_list))
+        .route("/services/docker/start", post(docker_start))
+        .route("/services/docker/stop", post(docker_stop))
+        .route("/services/docker/restart", post(docker_restart))
+        .route("/services/docker/logs", get(docker_logs))
+        // Docker Compose management
+        .route("/services/compose", get(compose_list))
+        .route("/services/compose/up", post(compose_up))
+        .route("/services/compose/down", post(compose_down))
+        .route("/services/compose/restart", post(compose_restart))
+        .route("/services/compose/logs", get(compose_logs))
 }
 
 /// Custom extractor that validates authentication before allowing access to state.
@@ -416,6 +438,116 @@ async fn logs(
     Ok(Json(serde_json::json!({ "lines": lines_vec })))
 }
 
+/// Query parameters for the /logs/stream endpoint.
+#[derive(Debug, Deserialize)]
+struct LogsStreamQuery {
+    /// Log file path (must be within /var/log/).
+    file: Option<String>,
+    /// Number of initial lines to send (default: 10).
+    initial_lines: Option<usize>,
+}
+
+/// GET /logs/stream - Stream log file updates via SSE (requires authentication)
+///
+/// Streams new log lines as they are appended to the file using Server-Sent Events.
+/// The connection stays open and sends new lines as they appear.
+///
+/// # Events
+///
+/// - `initial`: Initial batch of last N lines
+/// - `line`: New log line appended to file
+/// - `error`: Error occurred while reading file
+async fn logs_stream(
+    AuthenticatedState(state): AuthenticatedState,
+    Query(query): Query<LogsStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    let file_path = query
+        .file
+        .unwrap_or_else(|| "/var/log/cloud-init-output.log".to_string());
+    let initial_lines = query.initial_lines.unwrap_or(10).min(100);
+
+    // Validate the path to prevent directory traversal
+    let validated_path = validate_log_path(&file_path)?;
+    let path_clone = validated_path.clone();
+
+    state
+        .log_activity(
+            "logs_stream",
+            Some(format!("file={}", validated_path.display())),
+        )
+        .await;
+
+    // Create the SSE stream
+    let stream = async_stream::stream! {
+        // Send initial lines
+        match read_last_lines(&path_clone, initial_lines) {
+            Ok(lines) => {
+                for line in lines {
+                    yield Ok(Event::default().event("initial").data(line));
+                }
+            }
+            Err(e) => {
+                yield Ok(Event::default().event("error").data(format!("Failed to read initial lines: {}", e)));
+            }
+        }
+
+        // Track file position for tailing
+        let mut last_size = std::fs::metadata(&path_clone)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        // Poll for new content
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+
+        loop {
+            interval.tick().await;
+
+            // Check current file size
+            let current_size = match std::fs::metadata(&path_clone) {
+                Ok(m) => m.len(),
+                Err(_) => {
+                    // File might have been deleted/rotated, wait for it to reappear
+                    continue;
+                }
+            };
+
+            if current_size > last_size {
+                // File grew, read new content
+                match std::fs::File::open(&path_clone) {
+                    Ok(file) => {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let mut file = file;
+
+                        // Seek to where we left off
+                        if file.seek(SeekFrom::Start(last_size)).is_ok() {
+                            let mut new_content = String::new();
+                            if file.read_to_string(&mut new_content).is_ok() {
+                                for line in new_content.lines() {
+                                    if !line.is_empty() {
+                                        yield Ok(Event::default().event("line").data(line));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Ok(Event::default().event("error").data(format!("Failed to open file: {}", e)));
+                    }
+                }
+                last_size = current_size;
+            } else if current_size < last_size {
+                // File was truncated/rotated, start from beginning
+                last_size = 0;
+                yield Ok(Event::default().event("info").data("Log file was rotated, restarting from beginning"));
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 /// Validates a log file path, ensuring it exists and is within the allowed directory.
 ///
 /// This function prevents path traversal attacks by:
@@ -721,6 +853,506 @@ async fn volumes_unmount(
             "message": format!("Successfully unmounted {}", req.target)
         }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError::new(e)))),
+    }
+}
+
+// ============================================================================
+// Docker Container Management
+// ============================================================================
+
+/// GET /services/docker - List all Docker containers (requires authentication)
+///
+/// Returns all containers (running and stopped) with their status.
+async fn docker_list(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+
+    if !DockerManager::is_available().await {
+        return Json(serde_json::json!({
+            "available": false,
+            "containers": [],
+            "message": "Docker is not available on this system"
+        }));
+    }
+
+    match DockerManager::list_containers().await {
+        Ok(containers) => {
+            let running = containers.iter().filter(|c| c.state == "running").count();
+            Json(serde_json::json!({
+                "available": true,
+                "containers": containers,
+                "total": containers.len(),
+                "running": running
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "available": true,
+            "containers": [],
+            "error": e
+        })),
+    }
+}
+
+/// Request body for Docker container operations.
+#[derive(Debug, Deserialize)]
+struct DockerContainerRequest {
+    /// Container name or ID.
+    container: String,
+    /// Timeout in seconds (for stop/restart).
+    #[serde(default)]
+    timeout_secs: Option<u32>,
+}
+
+/// POST /services/docker/start - Start a Docker container (requires authentication)
+async fn docker_start(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<DockerContainerRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity("docker_start", Some(format!("container={}", req.container)))
+        .await;
+
+    let result = DockerManager::start_container(&req.container).await;
+    Json(result)
+}
+
+/// POST /services/docker/stop - Stop a Docker container (requires authentication)
+async fn docker_stop(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<DockerContainerRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity("docker_stop", Some(format!("container={}", req.container)))
+        .await;
+
+    let result = DockerManager::stop_container(&req.container, req.timeout_secs).await;
+    Json(result)
+}
+
+/// POST /services/docker/restart - Restart a Docker container (requires authentication)
+async fn docker_restart(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<DockerContainerRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity(
+            "docker_restart",
+            Some(format!("container={}", req.container)),
+        )
+        .await;
+
+    let result = DockerManager::restart_container(&req.container, req.timeout_secs).await;
+    Json(result)
+}
+
+/// Query parameters for Docker logs endpoint.
+#[derive(Debug, Deserialize)]
+struct DockerLogsQuery {
+    /// Container name or ID.
+    container: String,
+    /// Number of lines to return.
+    lines: Option<usize>,
+    /// Show logs since timestamp (e.g., "10m", "1h", "2023-01-01T00:00:00").
+    since: Option<String>,
+}
+
+/// GET /services/docker/logs - Get Docker container logs (requires authentication)
+async fn docker_logs(
+    AuthenticatedState(state): AuthenticatedState,
+    Query(query): Query<DockerLogsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    match DockerManager::container_logs(&query.container, query.lines, query.since.as_deref()).await
+    {
+        Ok(logs) => Ok(Json(serde_json::json!({
+            "container": query.container,
+            "logs": logs
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError::new(e)))),
+    }
+}
+
+// ============================================================================
+// Docker Compose Management
+// ============================================================================
+
+/// Query parameters for compose endpoints.
+#[derive(Debug, Deserialize)]
+struct ComposeQuery {
+    /// Working directory for compose commands.
+    #[serde(default)]
+    working_dir: Option<String>,
+}
+
+/// GET /services/compose - List Docker Compose services (requires authentication)
+///
+/// Returns all services defined in the compose file with their status.
+async fn compose_list(
+    AuthenticatedState(state): AuthenticatedState,
+    Query(query): Query<ComposeQuery>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    if !ComposeManager::is_available().await {
+        return Json(serde_json::json!({
+            "available": false,
+            "services": [],
+            "message": "Docker Compose is not available on this system"
+        }));
+    }
+
+    let manager = ComposeManager::new(query.working_dir.as_deref());
+
+    if !manager.has_compose_file() {
+        return Json(serde_json::json!({
+            "available": true,
+            "has_compose_file": false,
+            "services": [],
+            "message": "No compose file found in working directory"
+        }));
+    }
+
+    match manager.list_services().await {
+        Ok(services) => {
+            let running = services.iter().filter(|s| s.state == "running").count();
+            Json(serde_json::json!({
+                "available": true,
+                "has_compose_file": true,
+                "services": services,
+                "total": services.len(),
+                "running": running
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "available": true,
+            "has_compose_file": true,
+            "services": [],
+            "error": e
+        })),
+    }
+}
+
+/// Request body for compose service operations.
+#[derive(Debug, Deserialize)]
+struct ComposeServiceRequest {
+    /// Service name (optional, affects all services if not provided).
+    #[serde(default)]
+    service: Option<String>,
+    /// Working directory for compose commands.
+    #[serde(default)]
+    working_dir: Option<String>,
+    /// Run in detached mode (for up).
+    #[serde(default = "default_true")]
+    detach: bool,
+    /// Remove volumes (for down).
+    #[serde(default)]
+    remove_volumes: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// POST /services/compose/up - Start Docker Compose services (requires authentication)
+async fn compose_up(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<ComposeServiceRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity("compose_up", Some(format!("service={:?}", req.service)))
+        .await;
+
+    let manager = ComposeManager::new(req.working_dir.as_deref());
+    let result = manager.up(req.service.as_deref(), req.detach).await;
+    Json(result)
+}
+
+/// POST /services/compose/down - Stop Docker Compose services (requires authentication)
+async fn compose_down(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<ComposeServiceRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity(
+            "compose_down",
+            Some(format!(
+                "service={:?} remove_volumes={}",
+                req.service, req.remove_volumes
+            )),
+        )
+        .await;
+
+    let manager = ComposeManager::new(req.working_dir.as_deref());
+    let result = manager
+        .down(req.service.as_deref(), req.remove_volumes)
+        .await;
+    Json(result)
+}
+
+/// POST /services/compose/restart - Restart Docker Compose services (requires authentication)
+async fn compose_restart(
+    AuthenticatedState(state): AuthenticatedState,
+    Json(req): Json<ComposeServiceRequest>,
+) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity(
+            "compose_restart",
+            Some(format!("service={:?}", req.service)),
+        )
+        .await;
+
+    let manager = ComposeManager::new(req.working_dir.as_deref());
+    let result = manager.restart(req.service.as_deref()).await;
+    Json(result)
+}
+
+/// Query parameters for compose logs endpoint.
+#[derive(Debug, Deserialize)]
+struct ComposeLogsQuery {
+    /// Service name (optional, shows all services if not provided).
+    #[serde(default)]
+    service: Option<String>,
+    /// Working directory for compose commands.
+    #[serde(default)]
+    working_dir: Option<String>,
+    /// Number of lines to return.
+    lines: Option<usize>,
+    /// Show logs since timestamp.
+    since: Option<String>,
+}
+
+/// GET /services/compose/logs - Get Docker Compose service logs (requires authentication)
+async fn compose_logs(
+    AuthenticatedState(state): AuthenticatedState,
+    Query(query): Query<ComposeLogsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.update_activity().await;
+
+    let manager = ComposeManager::new(query.working_dir.as_deref());
+
+    match manager
+        .logs(
+            query.service.as_deref(),
+            query.lines,
+            query.since.as_deref(),
+        )
+        .await
+    {
+        Ok(logs) => Ok(Json(serde_json::json!({
+            "service": query.service,
+            "logs": logs
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError::new(e)))),
+    }
+}
+
+// ============================================================================
+// Graceful Shutdown
+// ============================================================================
+
+/// Response for the shutdown endpoint.
+#[derive(Debug, Serialize)]
+struct ShutdownResponse {
+    success: bool,
+    message: String,
+    steps: Vec<ShutdownStep>,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ShutdownStep {
+    name: String,
+    success: bool,
+    message: String,
+}
+
+/// POST /shutdown - Gracefully prepare VM for destruction (requires authentication)
+///
+/// Executes cleanup operations before the VM is destroyed:
+/// 1. Runs pre_down hooks from project config
+/// 2. Stops docker-compose services
+/// 3. Flushes logs
+///
+/// Returns when all cleanup is complete.
+async fn shutdown(AuthenticatedState(state): AuthenticatedState) -> impl IntoResponse {
+    state.update_activity().await;
+
+    state
+        .log_activity("shutdown", Some("Starting graceful shutdown".to_string()))
+        .await;
+
+    let start = std::time::Instant::now();
+    let mut steps: Vec<ShutdownStep> = Vec::new();
+    let mut overall_success = true;
+
+    // Step 1: Run pre_down hook if configured
+    if let Some(config) = ProjectSetupManager::load_config() {
+        if let Some(ref hook) = config.hooks.pre_down {
+            tracing::info!("Running pre_down hook");
+
+            let result = run_hook_command(hook).await;
+            let success = result.is_ok();
+            if !success {
+                overall_success = false;
+            }
+
+            steps.push(ShutdownStep {
+                name: "pre_down_hook".to_string(),
+                success,
+                message: result.unwrap_or_else(|e| e),
+            });
+        }
+    }
+
+    // Step 2: Stop docker-compose services
+    if ComposeManager::is_available().await {
+        let manager = ComposeManager::new(None);
+
+        if manager.has_compose_file() {
+            tracing::info!("Stopping docker-compose services");
+
+            let result = manager.down(None, false).await;
+
+            steps.push(ShutdownStep {
+                name: "docker_compose_down".to_string(),
+                success: result.success,
+                message: result.message,
+            });
+
+            if !result.success {
+                overall_success = false;
+            }
+        } else {
+            steps.push(ShutdownStep {
+                name: "docker_compose_down".to_string(),
+                success: true,
+                message: "No compose file found, skipped".to_string(),
+            });
+        }
+    } else {
+        steps.push(ShutdownStep {
+            name: "docker_compose_down".to_string(),
+            success: true,
+            message: "Docker Compose not available, skipped".to_string(),
+        });
+    }
+
+    // Step 3: Stop any standalone Docker containers started by spuff
+    if DockerManager::is_available().await {
+        match DockerManager::list_containers().await {
+            Ok(containers) => {
+                let spuff_containers: Vec<_> = containers
+                    .iter()
+                    .filter(|c| c.name.starts_with("spuff-") && c.state == "running")
+                    .collect();
+
+                if !spuff_containers.is_empty() {
+                    let mut stopped = 0;
+                    let mut failed = 0;
+
+                    for container in spuff_containers {
+                        let result = DockerManager::stop_container(&container.name, Some(10)).await;
+                        if result.success {
+                            stopped += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    }
+
+                    steps.push(ShutdownStep {
+                        name: "docker_containers_stop".to_string(),
+                        success: failed == 0,
+                        message: format!("Stopped {} containers, {} failed", stopped, failed),
+                    });
+
+                    if failed > 0 {
+                        overall_success = false;
+                    }
+                } else {
+                    steps.push(ShutdownStep {
+                        name: "docker_containers_stop".to_string(),
+                        success: true,
+                        message: "No spuff containers to stop".to_string(),
+                    });
+                }
+            }
+            Err(e) => {
+                steps.push(ShutdownStep {
+                    name: "docker_containers_stop".to_string(),
+                    success: false,
+                    message: format!("Failed to list containers: {}", e),
+                });
+                overall_success = false;
+            }
+        }
+    }
+
+    // Step 4: Sync and flush filesystem
+    tracing::info!("Syncing filesystem");
+    let sync_result = tokio::process::Command::new("sync").output().await;
+
+    steps.push(ShutdownStep {
+        name: "filesystem_sync".to_string(),
+        success: sync_result.is_ok() && sync_result.as_ref().unwrap().status.success(),
+        message: if sync_result.is_ok() && sync_result.as_ref().unwrap().status.success() {
+            "Filesystem synced".to_string()
+        } else {
+            "Sync command failed".to_string()
+        },
+    });
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    state
+        .log_activity(
+            "shutdown_complete",
+            Some(format!(
+                "success={} duration={}ms",
+                overall_success, duration_ms
+            )),
+        )
+        .await;
+
+    Json(ShutdownResponse {
+        success: overall_success,
+        message: if overall_success {
+            "Graceful shutdown completed successfully".to_string()
+        } else {
+            "Graceful shutdown completed with some failures".to_string()
+        },
+        steps,
+        duration_ms,
+    })
+}
+
+/// Helper to run a hook command and capture result.
+async fn run_hook_command(command: &str) -> Result<String, String> {
+    let output = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute hook: {}", e))?;
+
+    if output.status.success() {
+        Ok("Hook completed successfully (exit code: 0)".to_string())
+    } else {
+        Err(format!(
+            "Hook failed with exit code: {:?}",
+            output.status.code()
+        ))
     }
 }
 

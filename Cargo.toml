@@ -18,8 +18,8 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP client for cloud APIs
 reqwest = { version = "0.12", features = [
-    "json",
-    "rustls-tls",
+  "json",
+  "rustls-tls",
 ], default-features = false }
 
 # HTTP server for agent
@@ -34,6 +34,8 @@ serde_yaml = "0.9"
 
 # Async
 async-trait = "0.1"
+async-stream = "0.3"
+futures = "0.3"
 
 # Error handling
 anyhow = "1"
@@ -69,7 +71,8 @@ sysinfo = "0.33"
 uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
-chrondb = "0.0.0-dev.5"
+# chrondb = "0.0.0-dev.7"
+chrondb = { path = "/Users/avelino/projects/moclojer/chrondb/bindings/rust" }
 
 # Base64 for cloud-init
 base64 = "0.22"

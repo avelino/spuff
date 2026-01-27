@@ -1,10 +1,10 @@
 //! System metrics collection for the spuff-agent.
 //!
 //! This module provides real-time system information including CPU, memory,
-//! disk, and load average metrics.
+//! disk, network, and load average metrics.
 
 use serde::Serialize;
-use sysinfo::{Disks, System};
+use sysinfo::{Disks, Networks, System};
 
 /// System-wide metrics snapshot.
 ///
@@ -29,6 +29,10 @@ pub struct SystemMetrics {
     pub disk_used: u64,
     /// Disk usage as a percentage (0-100).
     pub disk_percent: f32,
+    /// Disk I/O statistics.
+    pub disk_io: DiskIoStats,
+    /// Network I/O statistics.
+    pub network_io: NetworkIoStats,
     /// System load averages.
     pub load_avg: LoadAverage,
     /// System hostname.
@@ -39,6 +43,28 @@ pub struct SystemMetrics {
     pub kernel: String,
     /// Number of logical CPUs.
     pub cpus: usize,
+}
+
+/// Disk I/O statistics.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DiskIoStats {
+    /// Total bytes read since boot.
+    pub read_bytes: u64,
+    /// Total bytes written since boot.
+    pub write_bytes: u64,
+}
+
+/// Network I/O statistics (aggregated across all interfaces).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct NetworkIoStats {
+    /// Total bytes received since boot.
+    pub rx_bytes: u64,
+    /// Total bytes transmitted since boot.
+    pub tx_bytes: u64,
+    /// Total packets received since boot.
+    pub rx_packets: u64,
+    /// Total packets transmitted since boot.
+    pub tx_packets: u64,
 }
 
 /// System load averages for 1, 5, and 15 minute intervals.
@@ -85,6 +111,12 @@ impl SystemMetrics {
 
         let load = System::load_average();
 
+        // Collect disk I/O stats from /proc/diskstats (Linux)
+        let disk_io = Self::collect_disk_io();
+
+        // Collect network I/O stats
+        let network_io = Self::collect_network_io();
+
         Self {
             cpu_usage: sys.global_cpu_usage(),
             memory_total,
@@ -95,6 +127,8 @@ impl SystemMetrics {
             disk_total,
             disk_used,
             disk_percent,
+            disk_io,
+            network_io,
             load_avg: LoadAverage {
                 one: load.one,
                 five: load.five,
@@ -104,6 +138,76 @@ impl SystemMetrics {
             os: System::long_os_version().unwrap_or_else(|| "unknown".to_string()),
             kernel: System::kernel_version().unwrap_or_else(|| "unknown".to_string()),
             cpus: sys.cpus().len(),
+        }
+    }
+
+    /// Collect disk I/O statistics from /proc/diskstats.
+    fn collect_disk_io() -> DiskIoStats {
+        // On Linux, read from /proc/diskstats
+        // Format: major minor name reads_completed reads_merged sectors_read time_reading
+        //         writes_completed writes_merged sectors_written time_writing ...
+        // Sector size is typically 512 bytes
+        const SECTOR_SIZE: u64 = 512;
+
+        let content = match std::fs::read_to_string("/proc/diskstats") {
+            Ok(c) => c,
+            Err(_) => return DiskIoStats::default(),
+        };
+
+        let mut total_read_sectors: u64 = 0;
+        let mut total_write_sectors: u64 = 0;
+
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 14 {
+                continue;
+            }
+
+            let device_name = parts[2];
+
+            // Only count physical devices (sda, vda, nvme0n1) not partitions (sda1, vda1, nvme0n1p1)
+            let is_physical = (device_name.starts_with("sd") || device_name.starts_with("vd"))
+                && device_name.len() == 3
+                || (device_name.starts_with("nvme")
+                    && device_name.ends_with("n1")
+                    && !device_name.contains('p'));
+
+            if is_physical {
+                // Field 6 is sectors read, field 10 is sectors written
+                if let (Ok(read), Ok(write)) = (parts[5].parse::<u64>(), parts[9].parse::<u64>()) {
+                    total_read_sectors += read;
+                    total_write_sectors += write;
+                }
+            }
+        }
+
+        DiskIoStats {
+            read_bytes: total_read_sectors * SECTOR_SIZE,
+            write_bytes: total_write_sectors * SECTOR_SIZE,
+        }
+    }
+
+    /// Collect network I/O statistics using sysinfo.
+    fn collect_network_io() -> NetworkIoStats {
+        let networks = Networks::new_with_refreshed_list();
+
+        let mut rx_bytes: u64 = 0;
+        let mut tx_bytes: u64 = 0;
+        let mut rx_packets: u64 = 0;
+        let mut tx_packets: u64 = 0;
+
+        for (_name, network) in &networks {
+            rx_bytes += network.total_received();
+            tx_bytes += network.total_transmitted();
+            rx_packets += network.total_packets_received();
+            tx_packets += network.total_packets_transmitted();
+        }
+
+        NetworkIoStats {
+            rx_bytes,
+            tx_bytes,
+            rx_packets,
+            tx_packets,
         }
     }
 }
@@ -188,9 +292,57 @@ mod tests {
         assert!(json.contains("disk_total"));
         assert!(json.contains("disk_used"));
         assert!(json.contains("disk_percent"));
+        assert!(json.contains("disk_io"));
+        assert!(json.contains("network_io"));
         assert!(json.contains("load_avg"));
         assert!(json.contains("hostname"));
         assert!(json.contains("cpus"));
+    }
+
+    #[test]
+    fn test_disk_io_stats_serialization() {
+        let disk_io = DiskIoStats {
+            read_bytes: 1024 * 1024 * 100,
+            write_bytes: 1024 * 1024 * 50,
+        };
+
+        let json = serde_json::to_string(&disk_io).unwrap();
+
+        assert!(json.contains("read_bytes"));
+        assert!(json.contains("write_bytes"));
+    }
+
+    #[test]
+    fn test_network_io_stats_serialization() {
+        let network_io = NetworkIoStats {
+            rx_bytes: 1024 * 1024 * 200,
+            tx_bytes: 1024 * 1024 * 100,
+            rx_packets: 10000,
+            tx_packets: 5000,
+        };
+
+        let json = serde_json::to_string(&network_io).unwrap();
+
+        assert!(json.contains("rx_bytes"));
+        assert!(json.contains("tx_bytes"));
+        assert!(json.contains("rx_packets"));
+        assert!(json.contains("tx_packets"));
+    }
+
+    #[test]
+    fn test_system_metrics_io_stats() {
+        let metrics = SystemMetrics::collect();
+
+        // Verify I/O stats are collected (they're cumulative counters from boot)
+        // On non-Linux systems, disk_io might be 0 but network_io should have data
+        // Just verify the fields exist and are serializable
+        let json = serde_json::to_string(&metrics.disk_io).unwrap();
+        assert!(json.contains("read_bytes"));
+        assert!(json.contains("write_bytes"));
+
+        let json = serde_json::to_string(&metrics.network_io).unwrap();
+        assert!(json.contains("rx_bytes"));
+        assert!(json.contains("tx_bytes"));
     }
 
     #[test]
