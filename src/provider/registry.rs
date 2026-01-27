@@ -61,7 +61,10 @@ impl ProviderRegistry {
     /// Register all default provider factories
     pub fn register_defaults(&mut self) {
         use super::digitalocean::DigitalOceanFactory;
+        use super::docker::DockerFactory;
+
         self.register(DigitalOceanFactory);
+        self.register(DockerFactory);
         // Future providers:
         // self.register(HetznerFactory);
         // self.register(AwsFactory);
@@ -148,6 +151,7 @@ mod tests {
     fn test_registry_with_defaults() {
         let registry = ProviderRegistry::with_defaults();
         assert!(registry.is_registered(ProviderType::DigitalOcean));
+        assert!(registry.is_registered(ProviderType::Docker));
     }
 
     #[test]
@@ -177,5 +181,21 @@ mod tests {
         let registry = ProviderRegistry::with_defaults();
         let implemented = registry.implemented_providers();
         assert!(implemented.contains(&ProviderType::DigitalOcean));
+        assert!(implemented.contains(&ProviderType::Docker));
+    }
+
+    #[test]
+    fn test_create_docker() {
+        let registry = ProviderRegistry::with_defaults();
+        // Docker doesn't need a token, so empty string is fine
+        let result = registry.create_by_name("docker", "", ProviderTimeouts::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_docker_with_local_alias() {
+        let registry = ProviderRegistry::with_defaults();
+        let result = registry.create_by_name("local", "", ProviderTimeouts::default());
+        assert!(result.is_ok());
     }
 }

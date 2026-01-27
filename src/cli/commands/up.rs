@@ -128,22 +128,27 @@ pub async fn execute(
         None => None, // Will use project/global config defaults
     };
 
-    // Pre-flight check: verify SSH key is usable
-    verify_ssh_key_accessible(config).await?;
+    let is_docker = config.provider == "docker" || config.provider == "local";
 
-    // Pre-flight check: verify SSHFS is available if volumes are configured
-    // Check both global config volumes and project volumes
-    let has_volumes = !config.volumes.is_empty()
-        || project_config
-            .as_ref()
-            .map(|pc| !pc.volumes.is_empty())
-            .unwrap_or(false);
-    if has_volumes {
-        verify_sshfs_available().await?;
+    // Pre-flight checks (skip for Docker which doesn't use SSH)
+    if !is_docker {
+        // Pre-flight check: verify SSH key is usable
+        verify_ssh_key_accessible(config).await?;
+
+        // Pre-flight check: verify SSHFS is available if volumes are configured
+        // Check both global config volumes and project volumes
+        let has_volumes = !config.volumes.is_empty()
+            || project_config
+                .as_ref()
+                .map(|pc| !pc.volumes.is_empty())
+                .unwrap_or(false);
+        if has_volumes {
+            verify_sshfs_available().await?;
+        }
     }
 
-    // In dev mode, build agent for Linux and upload
-    if dev {
+    // In dev mode, build agent for Linux and upload (skip for Docker)
+    if dev && !is_docker {
         println!(
             "{} Dev mode: building spuff-agent for Linux ({})",
             style("*").cyan().bold(),
@@ -209,27 +214,55 @@ pub async fn execute(
     let provision_result = provision_task.await;
 
     // Handle results
+    let is_docker = config.provider == "docker" || config.provider == "local";
+
     match (tui_result, provision_result) {
-        (Ok(Some((name, ip))), Ok(Ok(()))) => {
+        (Ok(Some((name, ip_or_id))), Ok(Ok(()))) => {
             // Success - print final message
             super::ssh::print_banner();
             println!(
                 "  {} {} {}",
                 style("✓").green().bold(),
                 style(&name).white().bold(),
-                style(format!("({})", &ip)).dim()
+                style(format!("({})", &ip_or_id)).dim()
             );
             println!();
-            println!("  {}  ssh {}@{}", style("SSH").dim(), config.ssh_user, ip);
-            println!(
-                "  {}  auto-destroy after {}",
-                style("Idle").dim(),
-                style(&config.idle_timeout).yellow()
-            );
+
+            if is_docker {
+                println!(
+                    "  {}  docker exec -it {} /bin/bash",
+                    style("Shell").dim(),
+                    &ip_or_id[..12.min(ip_or_id.len())]
+                );
+                println!(
+                    "  {}  container runs until 'spuff down'",
+                    style("Note").dim()
+                );
+            } else {
+                println!(
+                    "  {}  ssh {}@{}",
+                    style("SSH").dim(),
+                    config.ssh_user,
+                    ip_or_id
+                );
+                println!(
+                    "  {}  auto-destroy after {}",
+                    style("Idle").dim(),
+                    style(&config.idle_timeout).yellow()
+                );
+            }
 
             if !no_connect {
                 println!();
-                crate::connector::ssh::connect(&ip, config).await?;
+                if is_docker {
+                    // For Docker, get the container ID from state
+                    let db = StateDb::open()?;
+                    if let Some(instance) = db.get_active_instance()? {
+                        crate::connector::docker::connect(&instance.id).await?;
+                    }
+                } else {
+                    crate::connector::ssh::connect(&ip_or_id, config).await?;
+                }
             }
         }
         (Ok(None), _) => {
@@ -640,57 +673,78 @@ async fn provision_instance(
         .await
         .ok();
 
-    // Step 4: Wait for SSH
+    // Step 4: Wait for SSH (or Docker container ready)
     tx.send(ProgressMessage::SetStep(
         STEP_WAIT_SSH,
         StepState::InProgress,
     ))
     .await
     .ok();
-    tx.send(ProgressMessage::SetDetail(format!(
-        "Waiting for SSH port on {}...",
-        instance.ip
-    )))
-    .await
-    .ok();
 
-    // First wait for SSH port to be open
-    if let Err(e) = wait_for_ssh(&instance.ip.to_string(), 22, Duration::from_secs(300)).await {
-        tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
-            .await
-            .ok();
-        tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
-        return Err(e);
-    }
+    let is_docker = params.config.provider == "docker" || params.config.provider == "local";
 
-    // Then wait for user to exist and SSH login to work
-    tx.send(ProgressMessage::SetDetail(format!(
-        "Waiting for user {}...",
-        params.config.ssh_user
-    )))
-    .await
-    .ok();
+    if is_docker {
+        // For Docker, just verify container is running
+        tx.send(ProgressMessage::SetDetail(
+            "Waiting for container to be ready...".to_string(),
+        ))
+        .await
+        .ok();
 
-    if let Err(e) = wait_for_ssh_login(
-        &instance.ip.to_string(),
-        &params.config,
-        Duration::from_secs(120),
-    )
-    .await
-    {
-        tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
-            .await
-            .ok();
-        tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
-        return Err(e);
+        if let Err(e) = crate::connector::docker::wait_for_ready(&instance.id).await {
+            tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
+                .await
+                .ok();
+            tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
+            return Err(e);
+        }
+    } else {
+        // For cloud providers, wait for SSH
+        tx.send(ProgressMessage::SetDetail(format!(
+            "Waiting for SSH port on {}...",
+            instance.ip
+        )))
+        .await
+        .ok();
+
+        // First wait for SSH port to be open
+        if let Err(e) = wait_for_ssh(&instance.ip.to_string(), 22, Duration::from_secs(300)).await {
+            tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
+                .await
+                .ok();
+            tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
+            return Err(e);
+        }
+
+        // Then wait for user to exist and SSH login to work
+        tx.send(ProgressMessage::SetDetail(format!(
+            "Waiting for user {}...",
+            params.config.ssh_user
+        )))
+        .await
+        .ok();
+
+        if let Err(e) = wait_for_ssh_login(
+            &instance.ip.to_string(),
+            &params.config,
+            Duration::from_secs(120),
+        )
+        .await
+        {
+            tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Failed))
+                .await
+                .ok();
+            tx.send(ProgressMessage::Failed(e.to_string())).await.ok();
+            return Err(e);
+        }
     }
 
     tx.send(ProgressMessage::SetStep(STEP_WAIT_SSH, StepState::Done))
         .await
         .ok();
 
-    // In dev mode, upload local agent binary
-    if params.dev {
+    // In dev mode, upload local agent binary (skip for Docker)
+    if params.dev && !is_docker {
         tx.send(ProgressMessage::SetStep(
             STEP_UPLOAD_AGENT,
             StepState::InProgress,
@@ -729,7 +783,7 @@ async fn provision_instance(
         }
     }
 
-    // Step 5/6: Wait for cloud-init with sub-steps
+    // Step 5/6: Wait for cloud-init with sub-steps (skip for Docker)
     tx.send(ProgressMessage::SetStep(
         STEP_BOOTSTRAP,
         StepState::InProgress,
@@ -737,22 +791,31 @@ async fn provision_instance(
     .await
     .ok();
 
-    // Define sub-steps for bootstrap (minimal - devtools installed via agent)
-    let sub_steps = vec![
-        "Updating packages".to_string(),
-        "Installing spuff-agent".to_string(),
-    ];
-
-    tx.send(ProgressMessage::SetSubSteps(STEP_BOOTSTRAP, sub_steps))
+    if is_docker {
+        // Docker containers are ready immediately - no cloud-init needed
+        tx.send(ProgressMessage::SetDetail(
+            "Container ready (no bootstrap needed)".to_string(),
+        ))
         .await
         .ok();
+    } else {
+        // Define sub-steps for bootstrap (minimal - devtools installed via agent)
+        let sub_steps = vec![
+            "Updating packages".to_string(),
+            "Installing spuff-agent".to_string(),
+        ];
 
-    // Wait for cloud-init with progress tracking
-    if let Err(e) =
-        wait_for_cloud_init_with_progress(&instance.ip.to_string(), &params.config, &tx).await
-    {
-        tracing::warn!("Cloud-init wait failed: {}", e);
-        // Don't fail the whole process, just warn
+        tx.send(ProgressMessage::SetSubSteps(STEP_BOOTSTRAP, sub_steps))
+            .await
+            .ok();
+
+        // Wait for cloud-init with progress tracking
+        if let Err(e) =
+            wait_for_cloud_init_with_progress(&instance.ip.to_string(), &params.config, &tx).await
+        {
+            tracing::warn!("Cloud-init wait failed: {}", e);
+            // Don't fail the whole process, just warn
+        }
     }
 
     tx.send(ProgressMessage::SetStep(STEP_BOOTSTRAP, StepState::Done))
@@ -760,7 +823,8 @@ async fn provision_instance(
         .ok();
 
     // Step: Mount volumes (if configured)
-    // Merge global volumes with project volumes (project volumes override global by target)
+    // For Docker: volumes are bind-mounted at container creation, skip SSHFS
+    // For cloud: use SSHFS to mount remote directories locally
     tx.send(ProgressMessage::SetStep(
         STEP_VOLUMES,
         StepState::InProgress,
@@ -768,170 +832,188 @@ async fn provision_instance(
     .await
     .ok();
 
-    // Build merged volume list: global volumes first, then project volumes
-    // Project volumes with same target override global ones
-    let mut merged_volumes: Vec<(crate::volume::VolumeConfig, Option<&std::path::Path>)> =
-        Vec::new();
-
-    // Add global volumes (no base_dir)
-    for vol in &params.config.volumes {
-        merged_volumes.push((vol.clone(), None));
-    }
-
-    // Add project volumes (with base_dir), overriding globals with same target
-    if let Some(ref pc) = params.project_config {
-        for vol in &pc.volumes {
-            // Remove any global volume with the same target
-            merged_volumes.retain(|(v, _)| v.target != vol.target);
-            merged_volumes.push((vol.clone(), pc.base_dir.as_deref()));
-        }
-    }
-
-    if !merged_volumes.is_empty() {
-        // Check SSHFS availability
-        let sshfs_available = SshfsDriver::check_sshfs_installed().await;
-        let fuse_available = SshfsDriver::check_fuse_available().await;
-
-        if !sshfs_available || !fuse_available {
-            tx.send(ProgressMessage::SetDetail(
-                "SSHFS not available - skipping volume mount".to_string(),
-            ))
-            .await
-            .ok();
-            tracing::warn!("SSHFS not available, skipping volume mount");
-        } else {
-            let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
-                .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
-            let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
-
-            let mut mounted_count = 0;
-            let total_volumes = merged_volumes.len();
-
-            for (idx, (vol, base_dir)) in merged_volumes.iter().enumerate() {
-                let mount_point = vol.resolve_mount_point(Some(&instance_name), *base_dir);
-                let source_path = vol.resolve_source(*base_dir);
-
-                // Check if this is a file volume (SSHFS doesn't support mounting files)
-                // Use async version that checks remotely via SSH when local source doesn't exist
-                let is_file = is_file_volume_async(
-                    &source_path,
-                    &vol.target,
-                    &instance.ip.to_string(),
-                    &params.config.ssh_user,
-                    &ssh_key_str,
-                )
-                .await;
-
-                tx.send(ProgressMessage::SetDetail(format!(
-                    "{} volume {}/{}: {}",
-                    if is_file { "Syncing" } else { "Mounting" },
-                    idx + 1,
-                    total_volumes,
-                    vol.target
-                )))
-                .await
-                .ok();
-
-                // Sync source to VM if defined
-                if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
-                    if let Err(e) = sync_to_vm(
-                        &instance.ip.to_string(),
-                        &params.config.ssh_user,
-                        &ssh_key_str,
-                        &source_path,
-                        &vol.target,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
-                    } else if is_file {
-                        // For files, sync counts as success (no SSHFS mount)
-                        mounted_count += 1;
-                    }
-                }
-
-                // Skip SSHFS mount for files (not supported)
-                if is_file {
-                    tracing::debug!(
-                        "Skipping SSHFS mount for file volume: {} (SSHFS only supports directories)",
-                        vol.target
-                    );
-                    continue;
-                }
-
-                // Mount the directory volume
-                match SshfsLocalCommands::mount(
-                    &instance.ip.to_string(),
-                    &params.config.ssh_user,
-                    &ssh_key_str,
-                    &vol.target,
-                    &mount_point,
-                    vol.read_only,
-                    &vol.options,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        mounted_count += 1;
-                        // Save to volume state
-                        let mut state = VolumeState::load_or_default();
-                        let handle =
-                            crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
-                                .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
-                                .with_source(&source_path)
-                                .with_read_only(vol.read_only);
-                        state.add_mount(handle);
-                        if let Err(e) = state.save() {
-                            tracing::error!(
-                                "Failed to save volume state: {}. Mount may not persist.",
-                                e
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to mount {}: {}", vol.target, e);
-                    }
-                }
-            }
-
-            tx.send(ProgressMessage::SetDetail(format!(
-                "Mounted {}/{} volume(s)",
-                mounted_count, total_volumes
-            )))
-            .await
-            .ok();
-        }
-    } else {
+    if is_docker {
+        // Docker volumes are handled via bind mounts at container creation
         tx.send(ProgressMessage::SetDetail(
-            "No volumes configured".to_string(),
+            "Volumes mounted via Docker bind mounts".to_string(),
         ))
         .await
         .ok();
-    }
+    } else {
+        // Build merged volume list: global volumes first, then project volumes
+        // Project volumes with same target override global ones
+        let mut merged_volumes: Vec<(crate::volume::VolumeConfig, Option<&std::path::Path>)> =
+            Vec::new();
+
+        // Add global volumes (no base_dir)
+        for vol in &params.config.volumes {
+            merged_volumes.push((vol.clone(), None));
+        }
+
+        // Add project volumes (with base_dir), overriding globals with same target
+        if let Some(ref pc) = params.project_config {
+            for vol in &pc.volumes {
+                // Remove any global volume with the same target
+                merged_volumes.retain(|(v, _)| v.target != vol.target);
+                merged_volumes.push((vol.clone(), pc.base_dir.as_deref()));
+            }
+        }
+
+        if !merged_volumes.is_empty() {
+            // Check SSHFS availability
+            let sshfs_available = SshfsDriver::check_sshfs_installed().await;
+            let fuse_available = SshfsDriver::check_fuse_available().await;
+
+            if !sshfs_available || !fuse_available {
+                tx.send(ProgressMessage::SetDetail(
+                    "SSHFS not available - skipping volume mount".to_string(),
+                ))
+                .await
+                .ok();
+                tracing::warn!("SSHFS not available, skipping volume mount");
+            } else {
+                let ssh_key_path = crate::ssh::managed_key::get_managed_key_path()
+                    .unwrap_or_else(|_| PathBuf::from(&params.config.ssh_key_path));
+                let ssh_key_str = ssh_key_path.to_string_lossy().to_string();
+
+                let mut mounted_count = 0;
+                let total_volumes = merged_volumes.len();
+
+                for (idx, (vol, base_dir)) in merged_volumes.iter().enumerate() {
+                    let mount_point = vol.resolve_mount_point(Some(&instance_name), *base_dir);
+                    let source_path = vol.resolve_source(*base_dir);
+
+                    // Check if this is a file volume (SSHFS doesn't support mounting files)
+                    // Use async version that checks remotely via SSH when local source doesn't exist
+                    let is_file = is_file_volume_async(
+                        &source_path,
+                        &vol.target,
+                        &instance.ip.to_string(),
+                        &params.config.ssh_user,
+                        &ssh_key_str,
+                    )
+                    .await;
+
+                    tx.send(ProgressMessage::SetDetail(format!(
+                        "{} volume {}/{}: {}",
+                        if is_file { "Syncing" } else { "Mounting" },
+                        idx + 1,
+                        total_volumes,
+                        vol.target
+                    )))
+                    .await
+                    .ok();
+
+                    // Sync source to VM if defined
+                    if !source_path.is_empty() && std::path::Path::new(&source_path).exists() {
+                        if let Err(e) = sync_to_vm(
+                            &instance.ip.to_string(),
+                            &params.config.ssh_user,
+                            &ssh_key_str,
+                            &source_path,
+                            &vol.target,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to sync {} to VM: {}", source_path, e);
+                        } else if is_file {
+                            // For files, sync counts as success (no SSHFS mount)
+                            mounted_count += 1;
+                        }
+                    }
+
+                    // Skip SSHFS mount for files (not supported)
+                    if is_file {
+                        tracing::debug!(
+                        "Skipping SSHFS mount for file volume: {} (SSHFS only supports directories)",
+                        vol.target
+                    );
+                        continue;
+                    }
+
+                    // Mount the directory volume
+                    match SshfsLocalCommands::mount(
+                        &instance.ip.to_string(),
+                        &params.config.ssh_user,
+                        &ssh_key_str,
+                        &vol.target,
+                        &mount_point,
+                        vol.read_only,
+                        &vol.options,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            mounted_count += 1;
+                            // Save to volume state
+                            let mut state = VolumeState::load_or_default();
+                            let handle =
+                                crate::volume::MountHandle::new("sshfs", &vol.target, &mount_point)
+                                    .with_vm_info(instance.ip.to_string(), &params.config.ssh_user)
+                                    .with_source(&source_path)
+                                    .with_read_only(vol.read_only);
+                            state.add_mount(handle);
+                            if let Err(e) = state.save() {
+                                tracing::error!(
+                                    "Failed to save volume state: {}. Mount may not persist.",
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to mount {}: {}", vol.target, e);
+                        }
+                    }
+                }
+
+                tx.send(ProgressMessage::SetDetail(format!(
+                    "Mounted {}/{} volume(s)",
+                    mounted_count, total_volumes
+                )))
+                .await
+                .ok();
+            }
+        } else {
+            tx.send(ProgressMessage::SetDetail(
+                "No volumes configured".to_string(),
+            ))
+            .await
+            .ok();
+        }
+    } // end of else (cloud provider volumes)
 
     tx.send(ProgressMessage::SetStep(STEP_VOLUMES, StepState::Done))
         .await
         .ok();
 
     // Trigger devtools installation via agent (async, non-blocking)
-    tx.send(ProgressMessage::SetDetail(
-        "Triggering devtools installation...".to_string(),
-    ))
-    .await
-    .ok();
+    // Skip for Docker as it doesn't have the agent
+    if !is_docker {
+        tx.send(ProgressMessage::SetDetail(
+            "Triggering devtools installation...".to_string(),
+        ))
+        .await
+        .ok();
 
-    if let Err(e) = trigger_devtools_installation(&instance.ip.to_string(), &params.config).await {
-        tracing::warn!("Failed to trigger devtools installation: {}", e);
-        // Don't fail - user can trigger manually with `spuff agent devtools install`
+        if let Err(e) =
+            trigger_devtools_installation(&instance.ip.to_string(), &params.config).await
+        {
+            tracing::warn!("Failed to trigger devtools installation: {}", e);
+            // Don't fail - user can trigger manually with `spuff agent devtools install`
+        }
     }
 
     // Complete!
-    tx.send(ProgressMessage::Complete(
-        instance_name.clone(),
-        instance.ip.to_string(),
-    ))
-    .await
-    .ok();
+    // For Docker: send container ID instead of IP (used for shell connection)
+    let display_id = if is_docker {
+        instance.id.clone()
+    } else {
+        instance.ip.to_string()
+    };
+
+    tx.send(ProgressMessage::Complete(instance_name.clone(), display_id))
+        .await
+        .ok();
 
     // Small delay to let the UI update
     tokio::time::sleep(Duration::from_millis(100)).await;

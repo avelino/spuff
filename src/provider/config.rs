@@ -189,12 +189,13 @@ pub enum ProviderType {
     DigitalOcean,
     Hetzner,
     Aws,
+    Docker,
 }
 
 impl ProviderType {
     /// Get all supported provider types
     pub fn all() -> &'static [ProviderType] {
-        &[Self::DigitalOcean, Self::Hetzner, Self::Aws]
+        &[Self::DigitalOcean, Self::Hetzner, Self::Aws, Self::Docker]
     }
 
     /// Get provider name as string
@@ -203,6 +204,7 @@ impl ProviderType {
             Self::DigitalOcean => "digitalocean",
             Self::Hetzner => "hetzner",
             Self::Aws => "aws",
+            Self::Docker => "docker",
         }
     }
 
@@ -217,6 +219,7 @@ impl ProviderType {
             "digitalocean" | "do" => Some(Self::DigitalOcean),
             "hetzner" | "hcloud" => Some(Self::Hetzner),
             "aws" | "ec2" => Some(Self::Aws),
+            "docker" | "local" => Some(Self::Docker),
             _ => None,
         }
     }
@@ -228,12 +231,13 @@ impl ProviderType {
             Self::DigitalOcean => "DIGITALOCEAN_TOKEN",
             Self::Hetzner => "HETZNER_TOKEN",
             Self::Aws => "AWS_ACCESS_KEY_ID",
+            Self::Docker => "", // Docker doesn't require a token
         }
     }
 
     /// Check if this provider is implemented
     pub fn is_implemented(&self) -> bool {
-        matches!(self, Self::DigitalOcean)
+        matches!(self, Self::DigitalOcean | Self::Docker)
     }
 }
 
@@ -305,6 +309,8 @@ mod tests {
             Some(ProviderType::Hetzner)
         );
         assert_eq!(ProviderType::from_str("aws"), Some(ProviderType::Aws));
+        assert_eq!(ProviderType::from_str("docker"), Some(ProviderType::Docker));
+        assert_eq!(ProviderType::from_str("local"), Some(ProviderType::Docker));
         assert_eq!(ProviderType::from_str("unknown"), None);
     }
 
@@ -316,6 +322,7 @@ mod tests {
         );
         assert_eq!(ProviderType::Hetzner.token_env_var(), "HETZNER_TOKEN");
         assert_eq!(ProviderType::Aws.token_env_var(), "AWS_ACCESS_KEY_ID");
+        assert_eq!(ProviderType::Docker.token_env_var(), "");
     }
 
     #[test]
@@ -323,5 +330,6 @@ mod tests {
         assert!(ProviderType::DigitalOcean.is_implemented());
         assert!(!ProviderType::Hetzner.is_implemented());
         assert!(!ProviderType::Aws.is_implemented());
+        assert!(ProviderType::Docker.is_implemented());
     }
 }

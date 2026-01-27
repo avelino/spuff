@@ -70,102 +70,116 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
         }
     }
 
-    // Step 1: Graceful shutdown on the remote VM
-    // This runs pre_down hooks and stops docker-compose services
-    println!(
-        "  {} {}",
-        style("◐").cyan(),
-        style("Running graceful shutdown on VM...").dim()
-    );
+    let is_docker = instance.provider == "docker" || instance.provider == "local";
 
-    match graceful_shutdown(&instance.ip, config).await {
-        Ok(response) => {
-            if response.success {
-                println!(
-                    "  {} Graceful shutdown completed in {}ms",
-                    style("✓").green().bold(),
-                    response.duration_ms
-                );
-            } else {
-                println!(
-                    "  {} Graceful shutdown completed with warnings",
-                    style("!").yellow().bold()
-                );
-            }
-            // Print step details if verbose
-            for step in &response.steps {
-                let icon = if step.success {
-                    style("✓").green()
+    // Step 1: Graceful shutdown on the remote VM (skip for Docker)
+    // This runs pre_down hooks and stops docker-compose services
+    if is_docker {
+        println!(
+            "  {} {}",
+            style("○").dim(),
+            style("Graceful shutdown skipped (Docker container)").dim()
+        );
+    } else {
+        println!(
+            "  {} {}",
+            style("◐").cyan(),
+            style("Running graceful shutdown on VM...").dim()
+        );
+
+        match graceful_shutdown(&instance.ip, config).await {
+            Ok(response) => {
+                if response.success {
+                    println!(
+                        "  {} Graceful shutdown completed in {}ms",
+                        style("✓").green().bold(),
+                        response.duration_ms
+                    );
                 } else {
-                    style("✕").red()
-                };
-                println!("    {} {} - {}", icon, step.name, step.message);
+                    println!(
+                        "  {} Graceful shutdown completed with warnings",
+                        style("!").yellow().bold()
+                    );
+                }
+                // Print step details if verbose
+                for step in &response.steps {
+                    let icon = if step.success {
+                        style("✓").green()
+                    } else {
+                        style("✕").red()
+                    };
+                    println!("    {} {} - {}", icon, step.name, step.message);
+                }
             }
-        }
-        Err(e) => {
-            // Log the error but continue - VM might already be unreachable
-            println!(
-                "  {} Graceful shutdown skipped: {}",
-                style("!").yellow().bold(),
-                e
-            );
+            Err(e) => {
+                // Log the error but continue - VM might already be unreachable
+                println!(
+                    "  {} Graceful shutdown skipped: {}",
+                    style("!").yellow().bold(),
+                    e
+                );
+            }
         }
     }
     println!();
 
     // Step 2: Unmount any locally mounted volumes BEFORE destroying the instance
     // This prevents SSHFS from hanging when the remote server disappears
-    let project_config = ProjectConfig::load_from_cwd().ok().flatten();
-    let mut volume_state = VolumeState::load_or_default();
+    // Skip for Docker as it uses bind mounts, not SSHFS
+    if !is_docker {
+        let project_config = ProjectConfig::load_from_cwd().ok().flatten();
+        let mut volume_state = VolumeState::load_or_default();
 
-    // Collect all mount points to unmount
-    let mut mount_points_to_unmount: Vec<String> = Vec::new();
+        // Collect all mount points to unmount
+        let mut mount_points_to_unmount: Vec<String> = Vec::new();
 
-    // Add mounts from project config
-    if let Some(ref pc) = project_config {
-        for vol in &pc.volumes {
-            let mount_point = vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
-            if !mount_points_to_unmount.contains(&mount_point) {
-                mount_points_to_unmount.push(mount_point);
-            }
-        }
-    }
-
-    // Add tracked mounts from state
-    for m in &volume_state.mounts {
-        if !mount_points_to_unmount.contains(&m.mount_point) {
-            mount_points_to_unmount.push(m.mount_point.clone());
-        }
-    }
-
-    if !mount_points_to_unmount.is_empty() {
-        println!();
-        println!(
-            "  {} {}",
-            style("◐").cyan(),
-            style("Unmounting local volumes...").dim()
-        );
-
-        for mount_point in &mount_points_to_unmount {
-            print!("    {} {}", style("→").dim(), style(&mount_point).white());
-
-            match SshfsLocalCommands::unmount(mount_point).await {
-                Ok(_) => {
-                    println!(" {}", style("✓").green());
-                    volume_state.remove_mount(mount_point);
-                }
-                Err(e) => {
-                    println!(" {}", style("✕").red());
-                    tracing::warn!("Failed to unmount {}: {}", mount_point, e);
-                    // Continue with other unmounts even if one fails
+        // Add mounts from project config
+        if let Some(ref pc) = project_config {
+            for vol in &pc.volumes {
+                let mount_point =
+                    vol.resolve_mount_point(Some(&instance.name), pc.base_dir.as_deref());
+                if !mount_points_to_unmount.contains(&mount_point) {
+                    mount_points_to_unmount.push(mount_point);
                 }
             }
         }
 
-        // Clear volume state - log errors but don't fail the down operation
-        volume_state.clear();
-        if let Err(e) = volume_state.save() {
-            tracing::warn!("Failed to clear volume state: {}", e);
+        // Add tracked mounts from state
+        for m in &volume_state.mounts {
+            if !mount_points_to_unmount.contains(&m.mount_point) {
+                mount_points_to_unmount.push(m.mount_point.clone());
+            }
+        }
+
+        if !mount_points_to_unmount.is_empty() {
+            println!();
+            println!(
+                "  {} {}",
+                style("◐").cyan(),
+                style("Unmounting local volumes...").dim()
+            );
+
+            for mount_point in &mount_points_to_unmount {
+                print!("    {} {}", style("→").dim(), style(&mount_point).white());
+
+                match SshfsLocalCommands::unmount(mount_point).await {
+                    Ok(_) => {
+                        println!(" {}", style("✓").green());
+                        volume_state.remove_mount(mount_point);
+                    }
+                    Err(e) => {
+                        println!(" {}", style("✕").red());
+                        tracing::warn!("Failed to unmount {}: {}", mount_point, e);
+                        // Continue with other unmounts even if one fails
+                    }
+                }
+            }
+
+            // Clear volume state - log errors but don't fail the down operation
+            volume_state.clear();
+            if let Err(e) = volume_state.save() {
+                tracing::warn!("Failed to clear volume state: {}", e);
+            }
         }
     }
 
