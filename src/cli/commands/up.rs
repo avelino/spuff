@@ -36,6 +36,7 @@ struct ProvisionParams {
     project_config: Option<ProjectConfig>,
     cli_ai_tools: Option<AiToolsConfig>,
     dev: bool,
+    db: StateDb,
 }
 
 pub async fn execute(
@@ -195,6 +196,7 @@ pub async fn execute(
         project_config: project_config.clone(),
         cli_ai_tools: cli_ai_tools.clone(),
         dev,
+        db,
     };
 
     // Spawn the provisioning task
@@ -533,7 +535,7 @@ async fn provision_instance(
     params: ProvisionParams,
     tx: mpsc::Sender<ProgressMessage>,
 ) -> Result<()> {
-    let db = StateDb::open()?;
+    let db = params.db;
     let provider = create_provider(&params.config)?;
 
     // Step 1: Generate cloud-init

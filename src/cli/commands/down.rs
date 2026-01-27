@@ -1,5 +1,6 @@
 use console::style;
 use dialoguer::Confirm;
+use serde::Deserialize;
 
 use crate::config::AppConfig;
 use crate::error::{Result, SpuffError};
@@ -8,6 +9,23 @@ use crate::provider::create_provider;
 use crate::state::StateDb;
 use crate::utils::format_elapsed;
 use crate::volume::{SshfsLocalCommands, VolumeState};
+
+/// Response from the shutdown endpoint.
+#[derive(Debug, Deserialize)]
+struct ShutdownResponse {
+    success: bool,
+    #[allow(dead_code)]
+    message: String,
+    steps: Vec<ShutdownStep>,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShutdownStep {
+    name: String,
+    success: bool,
+    message: String,
+}
 
 pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> Result<()> {
     let db = StateDb::open()?;
@@ -52,7 +70,50 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
         }
     }
 
-    // Unmount any locally mounted volumes BEFORE destroying the instance
+    // Step 1: Graceful shutdown on the remote VM
+    // This runs pre_down hooks and stops docker-compose services
+    println!(
+        "  {} {}",
+        style("◐").cyan(),
+        style("Running graceful shutdown on VM...").dim()
+    );
+
+    match graceful_shutdown(&instance.ip, config).await {
+        Ok(response) => {
+            if response.success {
+                println!(
+                    "  {} Graceful shutdown completed in {}ms",
+                    style("✓").green().bold(),
+                    response.duration_ms
+                );
+            } else {
+                println!(
+                    "  {} Graceful shutdown completed with warnings",
+                    style("!").yellow().bold()
+                );
+            }
+            // Print step details if verbose
+            for step in &response.steps {
+                let icon = if step.success {
+                    style("✓").green()
+                } else {
+                    style("✕").red()
+                };
+                println!("    {} {} - {}", icon, step.name, step.message);
+            }
+        }
+        Err(e) => {
+            // Log the error but continue - VM might already be unreachable
+            println!(
+                "  {} Graceful shutdown skipped: {}",
+                style("!").yellow().bold(),
+                e
+            );
+        }
+    }
+    println!();
+
+    // Step 2: Unmount any locally mounted volumes BEFORE destroying the instance
     // This prevents SSHFS from hanging when the remote server disappears
     let project_config = ProjectConfig::load_from_cwd().ok().flatten();
     let mut volume_state = VolumeState::load_or_default();
@@ -150,4 +211,56 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
     println!();
 
     Ok(())
+}
+
+/// Call the agent's /shutdown endpoint for graceful shutdown.
+async fn graceful_shutdown(ip: &str, config: &AppConfig) -> Result<ShutdownResponse> {
+    // Use SSH to tunnel to the agent and POST to /shutdown
+    let output = crate::connector::ssh::run_command(
+        ip,
+        config,
+        "curl -s -X POST http://127.0.0.1:7575/shutdown",
+    )
+    .await?;
+
+    // Extract JSON from output (may contain banner text from shell profile)
+    let json_str = extract_json(&output);
+
+    serde_json::from_str(json_str).map_err(|e| {
+        SpuffError::Provider(format!(
+            "Failed to parse shutdown response: {}. Response: {}",
+            e, output
+        ))
+    })
+}
+
+/// Extract JSON from output that may contain banner text before/after.
+fn extract_json(output: &str) -> &str {
+    let brace_pos = output.find('{');
+
+    let Some(start_pos) = brace_pos else {
+        return output.trim();
+    };
+
+    // Extract JSON object
+    let mut depth = 0;
+    let mut end_pos = None;
+    for (i, c) in output[start_pos..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_pos = Some(start_pos + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(end) = end_pos {
+        return &output[start_pos..=end];
+    }
+
+    output.trim()
 }

@@ -24,6 +24,7 @@
 //! - `RUST_LOG`: Log level (default: spuff_agent=info,tower_http=info)
 
 mod devtools;
+mod docker_manager;
 mod metrics;
 mod project_setup;
 mod routes;

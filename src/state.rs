@@ -3,7 +3,8 @@
 //! This module provides ChronDB-backed persistence for tracking which instances
 //! are currently active. This allows the CLI to maintain state across invocations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrondb::ChronDB;
 use chrono::{DateTime, Utc};
@@ -103,6 +104,9 @@ impl StateDb {
         let data_path = base.join("data");
         let index_path = base.join("index");
 
+        // Clean up stale lock before opening
+        Self::cleanup_stale_lock(&index_path);
+
         let data_path_str = data_path.to_str().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -119,6 +123,33 @@ impl StateDb {
         let db = ChronDB::open(data_path_str, index_path_str)?;
 
         Ok(Self { db })
+    }
+
+    /// Remove orphaned Lucene lock file if no process holds it.
+    fn cleanup_stale_lock(index_path: &Path) {
+        let lock_file = index_path.join("write.lock");
+        if !lock_file.exists() {
+            return;
+        }
+
+        // Check if any process is using the lock file
+        let lock_path_str = match lock_file.to_str() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let is_locked = Command::new("lsof")
+            .arg(lock_path_str)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+
+        if !is_locked {
+            // No process holds the lock - it's orphaned
+            if std::fs::remove_file(&lock_file).is_ok() {
+                eprintln!("Removed stale database lock file");
+            }
+        }
     }
 
     fn db_base_path() -> Result<PathBuf> {
