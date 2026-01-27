@@ -139,6 +139,14 @@ pub enum Commands {
     Exec {
         /// Command to execute
         command: String,
+
+        /// Force TTY allocation (interactive mode via SSH)
+        #[arg(short = 't', long = "tty")]
+        force_tty: bool,
+
+        /// Disable TTY (use agent HTTP, faster for non-interactive commands)
+        #[arg(short = 'T', long = "no-tty")]
+        no_tty: bool,
     },
 
     /// Manage AI coding tools
@@ -366,9 +374,13 @@ impl Cli {
                     }
                 }
             }
-            Commands::Exec { command } => {
+            Commands::Exec {
+                command,
+                force_tty,
+                no_tty,
+            } => {
                 let config = AppConfig::load()?;
-                commands::agent::exec(&config, command).await
+                commands::agent::exec(&config, command, force_tty, no_tty).await
             }
             Commands::Ai { command } => {
                 let config = AppConfig::load()?;
