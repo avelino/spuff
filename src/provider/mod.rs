@@ -33,6 +33,7 @@
 
 pub mod config;
 pub mod digitalocean;
+pub mod docker;
 pub mod error;
 pub mod registry;
 

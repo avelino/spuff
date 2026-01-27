@@ -34,29 +34,52 @@ fn app_config_to_ssh_config(config: &AppConfig) -> SshConfig {
 }
 
 pub async fn execute(config: &AppConfig) -> Result<()> {
-    let db = StateDb::open()?;
-
-    let instance = db
-        .get_active_instance()?
-        .ok_or(SpuffError::NoActiveInstance)?;
+    // Extract instance data and drop db before interactive session
+    let (instance_id, instance_name, instance_ip, is_docker) = {
+        let db = StateDb::open()?;
+        let instance = db
+            .get_active_instance()?
+            .ok_or(SpuffError::NoActiveInstance)?;
+        let is_docker = instance.provider == "docker" || instance.provider == "local";
+        (
+            instance.id.clone(),
+            instance.name.clone(),
+            instance.ip.clone(),
+            is_docker,
+        )
+        // db is dropped here
+    };
 
     print_banner();
     println!(
         "  {} {} {}",
         style("→").bold(),
-        style(&instance.name).white().bold(),
-        style(format!("({})", &instance.ip)).dim()
+        style(&instance_name).white().bold(),
+        style(format!(
+            "({})",
+            if is_docker {
+                &instance_id[..12.min(instance_id.len())]
+            } else {
+                &instance_ip
+            }
+        ))
+        .dim()
     );
     println!();
 
-    // Check if there's a project config with ports
-    let ports = get_project_ports();
-
-    if !ports.is_empty() {
-        print_tunnel_info(&ports);
-        connect_with_tunnels(&instance.ip, config, &ports).await
+    if is_docker {
+        // For Docker, use docker exec directly
+        crate::connector::docker::connect(&instance_id).await
     } else {
-        crate::connector::ssh::connect(&instance.ip, config).await
+        // Check if there's a project config with ports
+        let ports = get_project_ports();
+
+        if !ports.is_empty() {
+            print_tunnel_info(&ports);
+            connect_with_tunnels(&instance_ip, config, &ports).await
+        } else {
+            crate::connector::ssh::connect(&instance_ip, config).await
+        }
     }
 }
 

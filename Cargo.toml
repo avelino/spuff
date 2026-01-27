@@ -56,7 +56,7 @@ indicatif = "0.17"
 console = "0.15"
 dialoguer = "0.11"
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Templates
 tera = "1"
@@ -72,6 +72,11 @@ uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
 chrondb = "0.0.0-dev.8"
+
+# Docker API (local provider)
+bollard = "0.18"
+bytes = "1"
+term_size = "0.3"
 
 # Base64 for cloud-init
 base64 = "0.22"
