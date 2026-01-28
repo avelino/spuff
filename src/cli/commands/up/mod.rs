@@ -159,34 +159,17 @@ pub async fn execute(
         db,
     };
 
-    // Spawn the provisioning task
-    let provision_task = tokio::spawn(async move { provision_instance(params, tx).await });
+    // Run provision and UI concurrently using join
+    // This avoids the JoinHandle deadlock issue
+    let provision_future = provision_instance(params, tx);
+    let ui_future = run_progress_ui(steps, rx);
 
-    // Run the TUI
-    tracing::debug!("Starting progress UI");
-    let tui_result = run_progress_ui(steps, rx).await;
-    tracing::debug!("Progress UI completed");
+    // Run both futures concurrently - UI handles messages from provision
+    let (provision_result, tui_result) = tokio::join!(provision_future, ui_future);
 
-    // Wait for the provisioning task with timeout
-    tracing::debug!("Waiting for provision task to complete");
-    let provision_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        provision_task
-    ).await;
-
-    let provision_result = match provision_result {
-        Ok(result) => {
-            tracing::debug!("Provision task completed normally");
-            result
-        }
-        Err(_) => {
-            tracing::error!("Provision task timed out after 10 seconds");
-            // Return a join error-like result
-            return Ok(());
-        }
-    };
-
-    // Handle results
+    // Handle results - wrap in Ok to match JoinHandle result type
+    let provision_result: std::result::Result<Result<()>, tokio::task::JoinError> =
+        Ok(provision_result);
     handle_provision_result(config, tui_result, provision_result, no_connect).await
 }
 
