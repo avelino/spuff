@@ -52,22 +52,31 @@ pub async fn provision_instance(
     let region = params.region;
 
     let provider = create_provider(&config)?;
+    let is_docker = config.provider == "docker" || config.provider == "local";
 
-    // Step 1: Generate cloud-init
+    // Step 1: Generate cloud-init (skip for Docker)
     tx.send(ProgressMessage::SetStep(
         STEP_CLOUD_INIT,
         StepState::InProgress,
     ))
     .await
     .ok();
-    tx.send(ProgressMessage::SetDetail(
-        "Preparing environment configuration...".to_string(),
-    ))
-    .await
-    .ok();
 
-    let user_data =
-        generate_cloud_init_with_ai_tools(&config, project_config.as_ref(), cli_ai_tools.as_ref())?;
+    let user_data = if is_docker {
+        tx.send(ProgressMessage::SetDetail(
+            "Docker provider - skipping cloud-init".to_string(),
+        ))
+        .await
+        .ok();
+        String::new() // Docker doesn't use cloud-init
+    } else {
+        tx.send(ProgressMessage::SetDetail(
+            "Preparing environment configuration...".to_string(),
+        ))
+        .await
+        .ok();
+        generate_cloud_init_with_ai_tools(&config, project_config.as_ref(), cli_ai_tools.as_ref())?
+    };
     tx.send(ProgressMessage::SetStep(STEP_CLOUD_INIT, StepState::Done))
         .await
         .ok();
@@ -86,7 +95,6 @@ pub async fn provision_instance(
     let instance_region = region.unwrap_or_else(|| config.region.clone());
     let instance_size = size.unwrap_or_else(|| config.size.clone());
     let image = get_image_spec(&config.provider, snapshot);
-    let is_docker = config.provider == "docker" || config.provider == "local";
 
     // Build volume mounts for Docker provider
     let volume_mounts = if is_docker {
