@@ -80,6 +80,21 @@ jobs:
       - name: Test spuff status (no instance)
         run: ./target/release/spuff status
 
+      # Clean database between tests to avoid ChronDB lock issues
+      - name: Clean database before up
+        run: rm -rf ~/.spuff/chrondb ~/.spuff/state.db
+
+      - name: Debug - check ChronDB library
+        run: |
+          echo "=== ChronDB library location ==="
+          ls -la ~/.chrondb/lib/ || echo "No library dir"
+          echo "=== LD_LIBRARY_PATH ==="
+          echo $LD_LIBRARY_PATH
+          echo "=== Spuff data dir ==="
+          ls -la ~/.spuff/ || echo "No spuff dir"
+          echo "=== GLIBC version ==="
+          ldd --version | head -1
+
       - name: Test spuff up (Docker provider)
         run: |
           ./target/release/spuff up --no-connect
@@ -266,6 +281,13 @@ jobs:
           EOF
           sed -i 's/^          //' spuff.yaml
           echo "=== spuff.yaml ===" && cat spuff.yaml
+
+      - name: Debug - check ChronDB library
+        run: |
+          echo "=== ChronDB library location ==="
+          ls -la ~/.chrondb/lib/ || echo "No library dir"
+          echo "=== Spuff data dir ==="
+          ls -la ~/.spuff/ || echo "No spuff dir"
 
       - name: Test spuff up with project config
         working-directory: /tmp/test-project
