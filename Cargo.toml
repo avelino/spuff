@@ -65,13 +65,13 @@ tera = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # System info for agent
-sysinfo = "0.33"
+sysinfo = "0.38"
 
 # UUID for instance naming
 uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
-chrondb = "0.0.0-dev.8"
+chrondb = "0.0.0-dev.9"
 
 # Docker API (local provider)
 bollard = "0.18"
