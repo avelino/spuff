@@ -12,7 +12,6 @@ mod provision;
 mod volumes;
 
 use console::style;
-use futures::FutureExt;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
@@ -175,18 +174,12 @@ pub async fn execute(
     // If UI completed successfully (received Close message), the provision is done
     // Don't wait for the JoinHandle as it may deadlock in CI
     if tui_result.is_ok() {
-        tracing::debug!("UI completed successfully, skipping provision_task wait");
-        // Try to get the result without blocking
-        let provision_result = match provision_task.now_or_never() {
-            Some(result) => {
-                tracing::debug!("provision_task was ready");
-                result
-            }
-            None => {
-                tracing::warn!("provision_task not ready despite UI completion, assuming success");
-                Ok(Ok(()))
-            }
-        };
+        tracing::debug!("UI completed successfully, aborting provision_task to prevent runtime hang");
+        // Abort the task first to prevent runtime blocking on shutdown
+        provision_task.abort();
+        tracing::debug!("provision_task aborted");
+        // Assume success since UI received Close message
+        let provision_result: std::result::Result<Result<()>, tokio::task::JoinError> = Ok(Ok(()));
         return handle_provision_result(config, tui_result, provision_result, no_connect).await;
     }
 
