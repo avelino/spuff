@@ -10,6 +10,7 @@ jobs:
   e2e-docker:
     name: E2E Tests (Docker)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # ChronDB uses GraalVM native-image which requires large stack (~32MB).
     # Tests are informational until ChronDB resolves this limitation.
     continue-on-error: true
@@ -71,12 +72,17 @@ jobs:
       # ============================================
       # Docker provider tests
       # ============================================
+      - name: Pull Docker image
+        run: docker pull ubuntu:24.04
+
       - name: Test spuff up
+        timeout-minutes: 5
         run: |
           ./target/release/spuff up --no-connect
           echo "Instance created successfully"
 
       - name: Test status and exec
+        timeout-minutes: 2
         run: |
           ./target/release/spuff status
           ./target/release/spuff status --detailed
@@ -86,18 +92,21 @@ jobs:
           ./target/release/spuff exec "cat /etc/os-release | head -5"
 
       - name: Test agent commands
+        timeout-minutes: 2
         run: |
           ./target/release/spuff agent status
           ./target/release/spuff agent metrics
           ./target/release/spuff agent processes
 
       - name: Test logs and volumes
+        timeout-minutes: 2
         run: |
           ./target/release/spuff logs --lines 10 || true
           ./target/release/spuff volume ls
           ./target/release/spuff volume status || true
 
       - name: Test file operations
+        timeout-minutes: 2
         run: |
           ./target/release/spuff exec "echo 'test content' > /tmp/e2e-test.txt"
           CONTENT=$(./target/release/spuff exec "cat /tmp/e2e-test.txt")
@@ -107,11 +116,13 @@ jobs:
           ./target/release/spuff exec "ls -la /tmp/e2e-dir/subdir/"
 
       - name: Test exit codes
+        timeout-minutes: 2
         run: |
           ./target/release/spuff exec "true"
           ! ./target/release/spuff exec "false"
 
       - name: Test spuff down
+        timeout-minutes: 2
         run: |
           ./target/release/spuff down --force
           ./target/release/spuff status 2>&1 | grep -q "No active environment"
@@ -134,10 +145,12 @@ jobs:
           EOF
 
       - name: Test spuff up with project config
+        timeout-minutes: 5
         working-directory: /tmp/test-project
         run: ${{ github.workspace }}/target/release/spuff up --no-connect
 
       - name: Verify project packages installed
+        timeout-minutes: 2
         working-directory: /tmp/test-project
         run: |
           ${{ github.workspace }}/target/release/spuff exec "which curl"
@@ -145,5 +158,6 @@ jobs:
           ${{ github.workspace }}/target/release/spuff status --detailed
 
       - name: Cleanup project
+        timeout-minutes: 2
         working-directory: /tmp/test-project
         run: ${{ github.workspace }}/target/release/spuff down --force
