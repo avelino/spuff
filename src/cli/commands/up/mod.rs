@@ -163,10 +163,14 @@ pub async fn execute(
     let provision_task = tokio::spawn(async move { provision_instance(params, tx).await });
 
     // Run the TUI
+    tracing::debug!("Starting progress UI");
     let tui_result = run_progress_ui(steps, rx).await;
+    tracing::debug!("Progress UI completed");
 
     // Wait for the provisioning task
+    tracing::debug!("Waiting for provision task to complete");
     let provision_result = provision_task.await;
+    tracing::debug!("Provision task completed");
 
     // Handle results
     handle_provision_result(config, tui_result, provision_result, no_connect).await

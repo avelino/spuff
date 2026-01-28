@@ -77,6 +77,8 @@ jobs:
 
       - name: Test spuff up
         timeout-minutes: 5
+        env:
+          RUST_LOG: debug
         run: |
           ./target/release/spuff up --no-connect
           echo "Instance created successfully"

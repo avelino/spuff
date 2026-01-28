@@ -375,15 +375,19 @@ pub async fn provision_instance(
         instance.ip.to_string()
     };
 
+    tracing::debug!("Sending Complete message");
     tx.send(ProgressMessage::Complete(instance_name.clone(), display_id))
         .await
         .ok();
 
     // Small delay to let the UI update
+    tracing::debug!("Sleeping 100ms for UI update");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    tracing::debug!("Sending Close message");
     tx.send(ProgressMessage::Close).await.ok();
 
+    tracing::debug!("provision_instance completed successfully");
     Ok(())
 }
 
