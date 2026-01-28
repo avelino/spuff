@@ -11,200 +11,7 @@ jobs:
     name: E2E Tests (Docker)
     runs-on: ubuntu-latest
     # ChronDB uses GraalVM native-image which requires large stack (~32MB).
-    # All FFI calls need this - no workaround in CI environment.
     # Tests are informational until ChronDB resolves this limitation.
-    continue-on-error: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-e2e-
-
-      - name: Cache ChronDB native library
-        uses: actions/cache@v4
-        with:
-          path: ~/.chrondb/lib/
-          key: ${{ runner.os }}-chrondb-lib-v4
-
-      - name: Build release binaries
-        run: cargo build --release
-
-      - name: Setup spuff config directory
-        run: |
-          mkdir -p ~/.spuff
-          rm -rf ~/.spuff/chrondb
-          rm -f ~/.spuff/state.db
-
-      - name: Initialize spuff with Docker provider
-        run: |
-          cat > ~/.spuff/config.yaml << 'EOF'
-          provider: docker
-          ssh_key_path: ~/.ssh/id_ed25519
-          ssh_user: dev
-          idle_timeout: 30m
-          region: local
-          size: default
-          environment: devbox
-          volumes: []
-          EOF
-          sed -i 's/^          //' ~/.spuff/config.yaml
-          echo "=== Config file ===" && cat ~/.spuff/config.yaml
-
-      - name: Generate SSH key for tests
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
-          cat ~/.ssh/id_ed25519.pub
-
-      - name: Test spuff version
-        run: ./target/release/spuff --version
-
-      - name: Test spuff help
-        run: ./target/release/spuff --help
-
-      - name: Test spuff status (no instance)
-        run: ./target/release/spuff status
-
-      # Clean database between tests to avoid ChronDB lock issues
-      - name: Clean database before up
-        run: rm -rf ~/.spuff/chrondb ~/.spuff/state.db
-
-      - name: Debug - check ChronDB library
-        run: |
-          echo "=== ChronDB library location ==="
-          ls -la ~/.chrondb/lib/ || echo "No library dir"
-          echo "=== LD_LIBRARY_PATH ==="
-          echo $LD_LIBRARY_PATH
-          echo "=== Spuff data dir ==="
-          ls -la ~/.spuff/ || echo "No spuff dir"
-          echo "=== GLIBC version ==="
-          ldd --version | head -1
-
-      - name: Test spuff up (Docker provider)
-        run: |
-          ./target/release/spuff up --no-connect
-          echo "Instance created successfully"
-
-      - name: Test spuff status (with instance)
-        run: ./target/release/spuff status
-
-      - name: Test spuff status --detailed
-        run: ./target/release/spuff status --detailed
-
-      - name: Test spuff exec
-        run: |
-          ./target/release/spuff exec "echo 'Hello from E2E test'"
-          ./target/release/spuff exec "whoami"
-          ./target/release/spuff exec "pwd"
-
-      - name: Test spuff exec with complex command
-        run: |
-          ./target/release/spuff exec "cat /etc/os-release | head -5"
-
-      - name: Test spuff agent status
-        run: ./target/release/spuff agent status
-
-      - name: Test spuff agent metrics
-        run: ./target/release/spuff agent metrics
-
-      - name: Test spuff agent processes
-        run: ./target/release/spuff agent processes
-
-      - name: Test spuff logs
-        run: ./target/release/spuff logs --lines 10 || true
-
-      - name: Test spuff volume ls
-        run: ./target/release/spuff volume ls
-
-      - name: Test spuff volume status
-        run: ./target/release/spuff volume status || true
-
-      - name: Test file creation and reading
-        run: |
-          ./target/release/spuff exec "echo 'test content' > /tmp/e2e-test.txt"
-          ./target/release/spuff exec "cat /tmp/e2e-test.txt"
-          CONTENT=$(./target/release/spuff exec "cat /tmp/e2e-test.txt")
-          if [[ "$CONTENT" != *"test content"* ]]; then
-            echo "File content mismatch!"
-            exit 1
-          fi
-          echo "File creation and reading OK"
-
-      - name: Test directory operations
-        run: |
-          ./target/release/spuff exec "mkdir -p /tmp/e2e-dir/subdir"
-          ./target/release/spuff exec "touch /tmp/e2e-dir/subdir/file.txt"
-          ./target/release/spuff exec "ls -la /tmp/e2e-dir/subdir/"
-
-      - name: Test environment variables
-        run: |
-          RESULT=$(./target/release/spuff exec "echo \$HOME")
-          echo "HOME in container: $RESULT"
-
-      - name: Test exit codes
-        run: |
-          # Test successful command
-          ./target/release/spuff exec "true"
-          echo "Exit code 0: OK"
-
-          # Test failing command (should fail)
-          if ./target/release/spuff exec "false"; then
-            echo "Expected failure but got success!"
-            exit 1
-          fi
-          echo "Exit code 1: OK (expected failure)"
-
-      - name: Test spuff down
-        run: |
-          ./target/release/spuff down --force
-          echo "Instance destroyed successfully"
-
-      - name: Verify instance destroyed
-        run: |
-          STATUS_OUTPUT=$(./target/release/spuff status 2>&1)
-          if [[ "$STATUS_OUTPUT" == *"No active environment"* ]]; then
-            echo "Instance correctly destroyed"
-          else
-            echo "Instance may still exist"
-            echo "$STATUS_OUTPUT"
-          fi
-
-      - name: Test full cycle (up -> exec -> down)
-        run: |
-          echo "=== Starting full cycle test ==="
-
-          # Create instance
-          ./target/release/spuff up --no-connect
-
-          # Run some commands
-          ./target/release/spuff exec "uname -a"
-          ./target/release/spuff exec "df -h"
-          ./target/release/spuff exec "free -m" || true
-
-          # Destroy instance
-          ./target/release/spuff down --force
-
-          echo "=== Full cycle test completed ==="
-
-  e2e-docker-project:
-    name: E2E Tests (Docker with Project Config)
-    runs-on: ubuntu-latest
-    # ChronDB uses GraalVM native-image which requires large stack (~32MB).
     continue-on-error: true
 
     steps:
@@ -238,9 +45,8 @@ jobs:
 
       - name: Setup spuff config
         run: |
-          mkdir -p ~/.spuff
-          rm -rf ~/.spuff/chrondb
-          rm -f ~/.spuff/state.db
+          mkdir -p ~/.spuff ~/.ssh
+          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
           cat > ~/.spuff/config.yaml << 'EOF'
           provider: docker
           ssh_key_path: ~/.ssh/id_ed25519
@@ -252,59 +58,92 @@ jobs:
           volumes: []
           EOF
           sed -i 's/^          //' ~/.spuff/config.yaml
-          echo "=== Config file ===" && cat ~/.spuff/config.yaml
 
-      - name: Generate SSH key
+      # ============================================
+      # Basic CLI tests
+      # ============================================
+      - name: Test CLI basics
         run: |
-          mkdir -p ~/.ssh
-          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
+          ./target/release/spuff --version
+          ./target/release/spuff --help
+          ./target/release/spuff status
 
-      - name: Create test project with spuff.yaml
+      # ============================================
+      # Docker provider tests
+      # ============================================
+      - name: Test spuff up
+        run: |
+          ./target/release/spuff up --no-connect
+          echo "Instance created successfully"
+
+      - name: Test status and exec
+        run: |
+          ./target/release/spuff status
+          ./target/release/spuff status --detailed
+          ./target/release/spuff exec "echo 'Hello from E2E test'"
+          ./target/release/spuff exec "whoami"
+          ./target/release/spuff exec "pwd"
+          ./target/release/spuff exec "cat /etc/os-release | head -5"
+
+      - name: Test agent commands
+        run: |
+          ./target/release/spuff agent status
+          ./target/release/spuff agent metrics
+          ./target/release/spuff agent processes
+
+      - name: Test logs and volumes
+        run: |
+          ./target/release/spuff logs --lines 10 || true
+          ./target/release/spuff volume ls
+          ./target/release/spuff volume status || true
+
+      - name: Test file operations
+        run: |
+          ./target/release/spuff exec "echo 'test content' > /tmp/e2e-test.txt"
+          CONTENT=$(./target/release/spuff exec "cat /tmp/e2e-test.txt")
+          [[ "$CONTENT" == *"test content"* ]] || exit 1
+          ./target/release/spuff exec "mkdir -p /tmp/e2e-dir/subdir"
+          ./target/release/spuff exec "touch /tmp/e2e-dir/subdir/file.txt"
+          ./target/release/spuff exec "ls -la /tmp/e2e-dir/subdir/"
+
+      - name: Test exit codes
+        run: |
+          ./target/release/spuff exec "true"
+          ! ./target/release/spuff exec "false"
+
+      - name: Test spuff down
+        run: |
+          ./target/release/spuff down --force
+          ./target/release/spuff status 2>&1 | grep -q "No active environment"
+
+      # ============================================
+      # Project config tests (spuff.yaml)
+      # ============================================
+      - name: Create test project
         run: |
           mkdir -p /tmp/test-project
-          cd /tmp/test-project
-
-          cat > spuff.yaml << 'EOF'
+          cat > /tmp/test-project/spuff.yaml << 'EOF'
           name: e2e-test-project
-
           packages:
             - curl
             - jq
-
           setup:
-            - echo "Setup script 1 executed" > /tmp/setup-marker-1.txt
-            - echo "Setup script 2 executed" > /tmp/setup-marker-2.txt
-
+            - echo "Setup executed" > /tmp/setup-marker.txt
           env:
             E2E_TEST_VAR: "hello-from-e2e"
-            PROJECT_NAME: "test-project"
           EOF
-          sed -i 's/^          //' spuff.yaml
-          echo "=== spuff.yaml ===" && cat spuff.yaml
-
-      - name: Debug - check ChronDB library
-        run: |
-          echo "=== ChronDB library location ==="
-          ls -la ~/.chrondb/lib/ || echo "No library dir"
-          echo "=== Spuff data dir ==="
-          ls -la ~/.spuff/ || echo "No spuff dir"
 
       - name: Test spuff up with project config
         working-directory: /tmp/test-project
         run: ${{ github.workspace }}/target/release/spuff up --no-connect
 
-      - name: Verify project environment
+      - name: Verify project packages installed
         working-directory: /tmp/test-project
         run: |
-          # Check packages were installed
           ${{ github.workspace }}/target/release/spuff exec "which curl"
           ${{ github.workspace }}/target/release/spuff exec "which jq"
-          echo "Packages installed: OK"
+          ${{ github.workspace }}/target/release/spuff status --detailed
 
-      - name: Test project status
-        working-directory: /tmp/test-project
-        run: ${{ github.workspace }}/target/release/spuff status --detailed
-
-      - name: Cleanup test project
+      - name: Cleanup project
         working-directory: /tmp/test-project
         run: ${{ github.workspace }}/target/release/spuff down --force
