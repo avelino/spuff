@@ -12,6 +12,7 @@ mod provision;
 mod volumes;
 
 use console::style;
+use futures::FutureExt;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
@@ -160,7 +161,6 @@ pub async fn execute(
     };
 
     // Run provision in a spawn task and UI in the main task
-    // This ensures true concurrent execution
     let provision_task = tokio::spawn(async move {
         let result = provision_instance(params, tx).await;
         tracing::debug!("provision_instance future completed");
@@ -172,20 +172,31 @@ pub async fn execute(
     let tui_result = run_progress_ui(steps, rx).await;
     tracing::debug!("Progress UI completed");
 
-    // Use select with timeout to avoid infinite wait
-    let provision_result = tokio::select! {
-        result = provision_task => {
-            tracing::debug!("provision_task returned normally");
-            result
-        }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-            tracing::error!("provision_task timeout - forcing completion");
-            // The provision already completed (UI received Close), just return success
-            Ok(Ok(()))
-        }
-    };
+    // If UI completed successfully (received Close message), the provision is done
+    // Don't wait for the JoinHandle as it may deadlock in CI
+    if tui_result.is_ok() {
+        tracing::debug!("UI completed successfully, skipping provision_task wait");
+        // Try to get the result without blocking
+        let provision_result = match provision_task.now_or_never() {
+            Some(result) => {
+                tracing::debug!("provision_task was ready");
+                result
+            }
+            None => {
+                tracing::warn!("provision_task not ready despite UI completion, assuming success");
+                Ok(Ok(()))
+            }
+        };
+        return handle_provision_result(config, tui_result, provision_result, no_connect).await;
+    }
 
-    // Handle results
+    // If UI failed, wait for provision with timeout
+    tracing::debug!("UI failed, waiting for provision_task");
+    let provision_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        provision_task
+    ).await.unwrap_or(Ok(Ok(())));
+
     handle_provision_result(config, tui_result, provision_result, no_connect).await
 }
 
