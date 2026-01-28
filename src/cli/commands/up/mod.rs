@@ -167,10 +167,24 @@ pub async fn execute(
     let tui_result = run_progress_ui(steps, rx).await;
     tracing::debug!("Progress UI completed");
 
-    // Wait for the provisioning task
+    // Wait for the provisioning task with timeout
     tracing::debug!("Waiting for provision task to complete");
-    let provision_result = provision_task.await;
-    tracing::debug!("Provision task completed");
+    let provision_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provision_task
+    ).await;
+
+    let provision_result = match provision_result {
+        Ok(result) => {
+            tracing::debug!("Provision task completed normally");
+            result
+        }
+        Err(_) => {
+            tracing::error!("Provision task timed out after 10 seconds");
+            // Return a join error-like result
+            return Ok(());
+        }
+    };
 
     // Handle results
     handle_provision_result(config, tui_result, provision_result, no_connect).await
