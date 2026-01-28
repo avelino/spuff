@@ -71,7 +71,7 @@ sysinfo = "0.38"
 uuid = { version = "1", features = ["v4"] }
 
 # Local state storage
-chrondb = "0.0.0-dev.11"
+chrondb = "0.0.0-dev.12"
 
 # Docker API (local provider)
 bollard = "0.18"
