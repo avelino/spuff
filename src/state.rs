@@ -97,7 +97,24 @@ pub struct StateDb {
 
 impl StateDb {
     /// Open or create the state database.
+    ///
+    /// If the database is corrupted or incompatible, it will be automatically
+    /// reset. This is safe because the state database only tracks active instances
+    /// and can be reconstructed.
     pub fn open() -> Result<Self> {
+        match Self::try_open() {
+            Ok(db) => Ok(db),
+            Err(_) => {
+                // Database corrupted or incompatible - reset and retry
+                eprintln!("Resetting corrupted state database...");
+                Self::reset()?;
+                Self::try_open()
+            }
+        }
+    }
+
+    /// Attempt to open the database without recovery.
+    fn try_open() -> Result<Self> {
         let base = Self::db_base_path()?;
         std::fs::create_dir_all(&base)?;
 
@@ -123,6 +140,15 @@ impl StateDb {
         let db = ChronDB::open(data_path_str, index_path_str)?;
 
         Ok(Self { db })
+    }
+
+    /// Reset the state database by removing all data.
+    fn reset() -> Result<()> {
+        let base = Self::db_base_path()?;
+        if base.exists() {
+            std::fs::remove_dir_all(&base)?;
+        }
+        Ok(())
     }
 
     /// Remove orphaned Lucene lock file if no process holds it.
