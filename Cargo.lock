@@ -3322,6 +3322,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "indicatif",
+ "libc",
  "nix",
  "rand 0.8.5",
  "ratatui",

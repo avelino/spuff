@@ -158,7 +158,33 @@ impl StateDb {
             return;
         }
 
-        // Check if any process is using the lock file
+        // Try to acquire an exclusive lock non-blocking to check if the file is in use.
+        // If we can acquire it, no other process holds the lock, so it's orphaned.
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::io::AsRawFd;
+
+            if let Ok(file) = OpenOptions::new().read(true).write(true).open(&lock_file) {
+                // Try non-blocking exclusive lock
+                let fd = file.as_raw_fd();
+                let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                if result == 0 {
+                    // Successfully acquired lock - file was orphaned
+                    // Unlock and remove
+                    unsafe { libc::flock(fd, libc::LOCK_UN) };
+                    drop(file);
+                    if std::fs::remove_file(&lock_file).is_ok() {
+                        eprintln!("Removed stale database lock file");
+                    }
+                    return;
+                }
+                // Could not acquire lock - another process has it, don't remove
+                return;
+            }
+        }
+
+        // Fallback: use lsof (may not be available on all systems)
         let lock_path_str = match lock_file.to_str() {
             Some(s) => s,
             None => return,
