@@ -217,6 +217,10 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
 
     db.remove_instance(&instance.id)?;
 
+    // Explicitly drop the database to release the lock file before the process exits.
+    // ChronDB (Tantivy/Lucene) needs time to properly release its write.lock.
+    drop(db);
+
     println!(
         "  {} Instance {} destroyed.",
         style("✓").green().bold(),

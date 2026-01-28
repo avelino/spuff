@@ -174,7 +174,9 @@ pub async fn execute(
     // If UI completed successfully (received Close message), the provision is done
     // Don't wait for the JoinHandle as it may deadlock in CI
     if tui_result.is_ok() {
-        tracing::debug!("UI completed successfully, aborting provision_task to prevent runtime hang");
+        tracing::debug!(
+            "UI completed successfully, aborting provision_task to prevent runtime hang"
+        );
         // Abort the task first to prevent runtime blocking on shutdown
         provision_task.abort();
         tracing::debug!("provision_task aborted");
@@ -185,10 +187,9 @@ pub async fn execute(
 
     // If UI failed, wait for provision with timeout
     tracing::debug!("UI failed, waiting for provision_task");
-    let provision_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        provision_task
-    ).await.unwrap_or(Ok(Ok(())));
+    let provision_result = tokio::time::timeout(std::time::Duration::from_secs(5), provision_task)
+        .await
+        .unwrap_or(Ok(Ok(())));
 
     handle_provision_result(config, tui_result, provision_result, no_connect).await
 }
