@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.chrondb/lib/
-          key: ${{ runner.os }}-chrondb-lib-v2
+          key: ${{ runner.os }}-chrondb-lib-v3
 
       - name: Build release binaries
         run: cargo build --release
@@ -213,7 +213,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.chrondb/lib/
-          key: ${{ runner.os }}-chrondb-lib-v2
+          key: ${{ runner.os }}-chrondb-lib-v3
 
       - name: Build release binaries
         run: cargo build --release
