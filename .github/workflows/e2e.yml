@@ -45,7 +45,10 @@ jobs:
         run: cargo build --release
 
       - name: Setup spuff config directory
-        run: mkdir -p ~/.spuff
+        run: |
+          mkdir -p ~/.spuff
+          rm -rf ~/.spuff/chrondb
+          rm -f ~/.spuff/state.db
 
       - name: Initialize spuff with Docker provider
         run: |
@@ -221,6 +224,8 @@ jobs:
       - name: Setup spuff config
         run: |
           mkdir -p ~/.spuff
+          rm -rf ~/.spuff/chrondb
+          rm -f ~/.spuff/state.db
           cat > ~/.spuff/config.yaml << 'EOF'
           provider: docker
           ssh_key_path: ~/.ssh/id_ed25519
