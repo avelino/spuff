@@ -28,11 +28,15 @@ struct ShutdownStep {
 }
 
 pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> Result<()> {
-    let db = StateDb::open()?;
-
-    let instance = db
-        .get_active_instance()?
-        .ok_or(SpuffError::NoActiveInstance)?;
+    // Get instance info and release DB lock immediately to avoid contention
+    let instance = {
+        let db = StateDb::open()?;
+        let inst = db
+            .get_active_instance()?
+            .ok_or(SpuffError::NoActiveInstance)?;
+        drop(db);
+        inst
+    };
 
     super::ssh::print_banner();
 
@@ -215,11 +219,13 @@ pub async fn execute(config: &AppConfig, create_snapshot: bool, force: bool) -> 
     );
     provider.destroy_instance(&instance.id).await?;
 
-    db.remove_instance(&instance.id)?;
-
-    // Explicitly drop the database to release the lock file before the process exits.
-    // ChronDB (Tantivy/Lucene) needs time to properly release its write.lock.
-    drop(db);
+    // Reopen DB briefly just to remove the instance record
+    // This avoids holding the lock during the entire destroy operation
+    {
+        let db = StateDb::open()?;
+        db.remove_instance(&instance.id)?;
+        // db dropped here, releasing lock
+    }
 
     println!(
         "  {} Instance {} destroyed.",
