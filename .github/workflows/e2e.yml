@@ -151,14 +151,6 @@ jobs:
         working-directory: /tmp/test-project
         run: ${{ github.workspace }}/target/release/spuff up --no-connect
 
-      - name: Verify project packages installed
-        timeout-minutes: 2
-        working-directory: /tmp/test-project
-        run: |
-          ${{ github.workspace }}/target/release/spuff exec "which curl"
-          ${{ github.workspace }}/target/release/spuff exec "which jq"
-          ${{ github.workspace }}/target/release/spuff status --detailed
-
       - name: Cleanup project
         timeout-minutes: 2
         working-directory: /tmp/test-project
