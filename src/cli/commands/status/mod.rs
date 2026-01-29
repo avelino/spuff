@@ -21,9 +21,22 @@ use format::{format_bootstrap_status, format_status};
 use http::{get_bootstrap_status, get_devtools_status, get_project_status};
 
 pub async fn execute(config: &AppConfig, detailed: bool) -> Result<()> {
-    let db = StateDb::open()?;
+    let instance = match StateDb::open() {
+        Ok(db) => {
+            let inst = db.get_active_instance()?;
+            // Release database lock early before any I/O operations
+            drop(db);
+            inst
+        }
+        Err(e) => {
+            // ChronDB may fail in resource-constrained environments (e.g., Docker with limited stack)
+            // Treat as "no active environment" but log the error
+            tracing::warn!("Could not open state database: {}", e);
+            None
+        }
+    };
 
-    match db.get_active_instance()? {
+    match instance {
         Some(instance) => {
             super::ssh::print_banner();
             println!(

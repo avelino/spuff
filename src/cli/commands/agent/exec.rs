@@ -41,7 +41,11 @@ pub async fn exec(
         .get_active_instance()?
         .ok_or(SpuffError::NoActiveInstance)?;
 
+    // Clone needed values before dropping db to release the lock
+    let instance_id = instance.id.clone();
+    let instance_ip = instance.ip.clone();
     let is_docker = instance.provider == "docker" || instance.provider == "local";
+    drop(db);
 
     let needs_tty = match (force_tty, no_tty) {
         (true, _) => true,  // -t flag: force TTY
@@ -53,12 +57,12 @@ pub async fn exec(
         // Docker mode: use docker exec
         if needs_tty {
             let exit_code =
-                crate::connector::docker::exec_interactive(&instance.id, &command).await?;
+                crate::connector::docker::exec_interactive(&instance_id, &command).await?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         } else {
-            let output = crate::connector::docker::run_command(&instance.id, &command).await?;
+            let output = crate::connector::docker::run_command(&instance_id, &command).await?;
             print!("{}", output);
         }
     } else {
@@ -66,13 +70,13 @@ pub async fn exec(
         if needs_tty {
             // Interactive mode via SSH with PTY
             let exit_code =
-                crate::connector::ssh::exec_interactive(&instance.ip, config, &command).await?;
+                crate::connector::ssh::exec_interactive(&instance_ip, config, &command).await?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         } else {
             // Non-interactive mode via agent HTTP (faster)
-            exec_via_agent(&instance.ip, config, &command).await?;
+            exec_via_agent(&instance_ip, config, &command).await?;
         }
     }
 
