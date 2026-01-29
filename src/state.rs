@@ -102,15 +102,24 @@ impl StateDb {
     /// reset. This is safe because the state database only tracks active instances
     /// and can be reconstructed.
     pub fn open() -> Result<Self> {
-        match Self::try_open() {
-            Ok(db) => Ok(db),
-            Err(_) => {
-                // Database corrupted or incompatible - reset and retry
-                eprintln!("Resetting corrupted state database...");
-                Self::reset()?;
-                Self::try_open()
+        // Try to open with retries for lock contention
+        for attempt in 0..3 {
+            match Self::try_open() {
+                Ok(db) => return Ok(db),
+                Err(e) => {
+                    if attempt < 2 {
+                        // Brief delay to allow previous process to release lock
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                    // Final attempt failed - try reset
+                    eprintln!("Database locked or corrupted, resetting...");
+                    Self::reset()?;
+                    return Self::try_open().map_err(|_| e);
+                }
             }
         }
+        unreachable!()
     }
 
     /// Attempt to open the database without recovery.
