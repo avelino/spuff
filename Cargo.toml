@@ -73,7 +73,7 @@ uuid = { version = "1", features = ["v4"] }
 # Local state storage
 # TODO: change back to crates.io version after fix is published
 # chrondb = { path = "../../moclojer/chrondb/bindings/rust" }
-chrondb = "0.0.0-dev.13"
+chrondb = "0.0.0-dev.14"
 
 # Docker API (local provider)
 bollard = "0.18"
