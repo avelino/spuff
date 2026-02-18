@@ -106,6 +106,37 @@ impl<'a> AiToolsInstaller<'a> {
         }
     }
 
+    pub async fn install_openclaw(&self) {
+        self.installer
+            .update_status("openclaw", ToolStatus::Installing, None)
+            .await;
+
+        match self
+            .installer
+            .run_command("npm install -g openclaw")
+            .await
+        {
+            Ok(_) => {
+                let version = self
+                    .installer
+                    .run_command("openclaw --version 2>/dev/null")
+                    .await
+                    .ok()
+                    .map(|v| v.trim().to_string());
+                self.installer
+                    .update_status("openclaw", ToolStatus::Done, version)
+                    .await;
+                tracing::info!("OpenClaw installed");
+            }
+            Err(e) => {
+                self.installer
+                    .update_status("openclaw", ToolStatus::Failed(e.clone()), None)
+                    .await;
+                tracing::error!("OpenClaw installation failed: {}", e);
+            }
+        }
+    }
+
     pub async fn install_copilot(&self) {
         self.installer
             .update_status("copilot", ToolStatus::Installing, None)
@@ -295,6 +326,12 @@ mod tests {
             version_cmd: "opencode --version",
         },
         AiToolSpec {
+            id: "openclaw",
+            npm_package: "openclaw",
+            binary: "openclaw",
+            version_cmd: "openclaw --version",
+        },
+        AiToolSpec {
             id: "copilot",
             npm_package: "@github/copilot",
             binary: "copilot",
@@ -391,6 +428,7 @@ mod tests {
         assert!(tool_ids.contains(&"claude-code"));
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
+        assert!(tool_ids.contains(&"openclaw"));
         assert!(tool_ids.contains(&"copilot"));
         assert!(tool_ids.contains(&"cursor"));
         assert!(tool_ids.contains(&"cody"));
@@ -408,6 +446,7 @@ mod tests {
         assert_eq!(specs.get("claude-code"), Some(&"@anthropic-ai/claude-code"));
         assert_eq!(specs.get("codex"), Some(&"@openai/codex"));
         assert_eq!(specs.get("opencode"), Some(&"opencode-ai"));
+        assert_eq!(specs.get("openclaw"), Some(&"openclaw"));
         assert_eq!(specs.get("copilot"), Some(&"@github/copilot"));
         assert_eq!(specs.get("cursor"), Some(&"@anthropics/cursor-cli"));
         assert_eq!(specs.get("cody"), Some(&"@sourcegraph/cody"));

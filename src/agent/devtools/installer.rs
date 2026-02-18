@@ -64,6 +64,9 @@ impl DevToolsInstaller {
         if self.config.opencode {
             ai.install_opencode().await;
         }
+        if self.config.openclaw {
+            ai.install_openclaw().await;
+        }
         if self.config.copilot {
             ai.install_copilot().await;
         }
