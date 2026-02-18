@@ -20,6 +20,11 @@ const AI_TOOLS: &[(&str, &str, &str)] = &[
         "npm i -g opencode-ai",
     ),
     (
+        "openclaw",
+        "OpenClaw AI assistant with TUI mode (openclaw tui)",
+        "npm install -g openclaw",
+    ),
+    (
         "copilot",
         "GitHub Copilot CLI",
         "npm install -g @github/copilot",
@@ -213,7 +218,7 @@ pub async fn install(config: &AppConfig, tool: String) -> Result<()> {
     // Explicitly disable non-AI devtools to prevent reinstallation (serde defaults are true)
     // Base config disables all AI tools and non-AI devtools
     let base = r#""docker":false,"shell_tools":false,"nodejs":false"#;
-    let all_ai_false = r#""claude_code":false,"codex":false,"opencode":false,"copilot":false,"cursor":false,"cody":false,"aider":false,"gemini":false"#;
+    let all_ai_false = r#""claude_code":false,"codex":false,"opencode":false,"openclaw":false,"copilot":false,"cursor":false,"cody":false,"aider":false,"gemini":false"#;
 
     let config_json = match tool.as_str() {
         "claude-code" => {
@@ -234,6 +239,13 @@ pub async fn install(config: &AppConfig, tool: String) -> Result<()> {
             format!(
                 r#"{{{},{}}}"#,
                 all_ai_false.replace("\"opencode\":false", "\"opencode\":true"),
+                base
+            )
+        }
+        "openclaw" => {
+            format!(
+                r#"{{{},{}}}"#,
+                all_ai_false.replace("\"openclaw\":false", "\"openclaw\":true"),
                 base
             )
         }
@@ -343,6 +355,12 @@ pub async fn info(tool: &str) -> Result<()> {
             println!("  {}", style("Configuration").bold());
             println!("    Open-source, supports multiple AI providers");
             println!("    Documentation: https://opencode.ai");
+        }
+        "openclaw" => {
+            println!("  {}", style("Configuration").bold());
+            println!("    AI assistant with TUI mode: run 'openclaw tui' for interactive UI");
+            println!("    Supports remote sessions via SSH");
+            println!("    Documentation: https://docs.openclaw.ai");
         }
         "copilot" => {
             println!("  {}", style("Configuration").bold());

@@ -162,6 +162,7 @@ impl AiToolsConfig {
                 "claude-code",
                 "codex",
                 "opencode",
+                "openclaw",
                 "copilot",
                 "cursor",
                 "cody",
@@ -682,6 +683,7 @@ ai_tools: all
         assert!(config.ai_tools.should_install("claude-code"));
         assert!(config.ai_tools.should_install("codex"));
         assert!(config.ai_tools.should_install("opencode"));
+        assert!(config.ai_tools.should_install("openclaw"));
         assert!(config.ai_tools.should_install("copilot"));
         assert!(config.ai_tools.should_install("cursor"));
         assert!(config.ai_tools.should_install("cody"));
@@ -698,6 +700,7 @@ ai_tools: none
         assert!(!config.ai_tools.should_install("claude-code"));
         assert!(!config.ai_tools.should_install("codex"));
         assert!(!config.ai_tools.should_install("opencode"));
+        assert!(!config.ai_tools.should_install("openclaw"));
         assert!(!config.ai_tools.should_install("copilot"));
         assert!(!config.ai_tools.should_install("cursor"));
         assert!(!config.ai_tools.should_install("cody"));
@@ -742,6 +745,7 @@ ai_tools:
                 "claude-code",
                 "codex",
                 "opencode",
+                "openclaw",
                 "copilot",
                 "cursor",
                 "cody",

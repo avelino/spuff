@@ -57,6 +57,10 @@ pub struct DevToolsConfig {
     #[serde(default = "default_true")]
     pub opencode: bool,
 
+    /// Install OpenClaw AI assistant (with TUI mode: openclaw tui)
+    #[serde(default = "default_true")]
+    pub openclaw: bool,
+
     /// Install GitHub Copilot CLI
     #[serde(default = "default_true")]
     pub copilot: bool,
@@ -192,6 +196,13 @@ impl Default for DevToolsState {
                     version: None,
                 },
                 DevTool {
+                    id: "openclaw",
+                    name: "OpenClaw",
+                    description: "AI assistant with TUI mode",
+                    status: ToolStatus::Pending,
+                    version: None,
+                },
+                DevTool {
                     id: "copilot",
                     name: "GitHub Copilot CLI",
                     description: "AI coding assistant (GitHub)",
@@ -267,6 +278,7 @@ mod tests {
         );
         assert!(config.codex, "codex should default to true via serde");
         assert!(config.opencode, "opencode should default to true via serde");
+        assert!(config.openclaw, "openclaw should default to true via serde");
         assert!(config.copilot, "copilot should default to true via serde");
         assert!(config.cursor, "cursor should default to true via serde");
         assert!(config.cody, "cody should default to true via serde");
@@ -300,6 +312,7 @@ mod tests {
         assert!(tool_ids.contains(&"claude_code"));
         assert!(tool_ids.contains(&"codex"));
         assert!(tool_ids.contains(&"opencode"));
+        assert!(tool_ids.contains(&"openclaw"));
         assert!(tool_ids.contains(&"copilot"));
         assert!(tool_ids.contains(&"cursor"));
         assert!(tool_ids.contains(&"cody"));

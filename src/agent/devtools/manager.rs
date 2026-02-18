@@ -93,6 +93,10 @@ impl DevToolsManager {
             self.update_tool_status("opencode", ToolStatus::Skipped, None)
                 .await;
         }
+        if !config.openclaw {
+            self.update_tool_status("openclaw", ToolStatus::Skipped, None)
+                .await;
+        }
         if !config.copilot {
             self.update_tool_status("copilot", ToolStatus::Skipped, None)
                 .await;
