@@ -111,11 +111,7 @@ impl<'a> AiToolsInstaller<'a> {
             .update_status("openclaw", ToolStatus::Installing, None)
             .await;
 
-        match self
-            .installer
-            .run_command("npm install -g openclaw")
-            .await
-        {
+        match self.installer.run_command("npm install -g openclaw").await {
             Ok(_) => {
                 let version = self
                     .installer
